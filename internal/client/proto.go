@@ -484,6 +484,19 @@ func (c *Client) UpdateAgent(ctx context.Context, id string) error {
 	return nil
 }
 
+// ReloadSkills triggers a skill reload on the server.
+func (c *Client) ReloadSkills(ctx context.Context, id string) error {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/skills/reload", id), nil, nil, nil)
+	if err != nil {
+		return fmt.Errorf("failed to reload skills: %w", err)
+	}
+	defer rsp.Body.Close()
+	if err := checkStatus(rsp); err != nil {
+		return fmt.Errorf("failed to reload skills: %w", err)
+	}
+	return nil
+}
+
 // SetMainAgent switches the workspace's active agent (e.g. "coder" or
 // "plan") on the server.
 func (c *Client) SetMainAgent(ctx context.Context, id, agentID string) error {

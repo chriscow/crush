@@ -343,6 +343,14 @@ func (c *controllerV1) endpoints() []apigen.Endpoint {
 			Fails(400, 404, 409, 500).
 			Handle(c.handlePostWorkspaceAgentMain),
 
+		apigen.Post("/v1/workspaces/{id}/skills/reload").
+			Summary("Reload skills").
+			Description("Re-discovers workspace skills and updates the coder agent prompt and tools.").
+			Tags("skills").
+			PathParam("id", "Workspace ID").
+			Fails(404, 500).
+			Handle(c.handlePostWorkspaceSkillsReload),
+
 		apigen.Get("/v1/workspaces/{id}/agent/sessions/{sid}").
 			Summary("Get agent session").
 			Tags("agent").

@@ -171,10 +171,18 @@ func (b *Backend) UpdateAgent(ctx context.Context, workspaceID string) error {
 	return ws.UpdateAgentModel(ctx)
 }
 
+// ReloadSkills re-discovers skills and propagates them to the agent.
+func (b *Backend) ReloadSkills(ctx context.Context, workspaceID string) error {
+	ws, err := b.GetWorkspace(workspaceID)
+	if err != nil {
+		return err
+	}
+	return ws.ReloadSkills(ctx)
+}
+
 // SetMainAgent switches the workspace's active agent (coder or plan). It
 // is rejected while the agent is running so a switch can never strand a
-// run's queued prompts on the previous agent — the same protection the
-// TUI gives itself with its busy check before toggling input mode.
+// run's queued prompts on the previous agent.
 func (b *Backend) SetMainAgent(workspaceID, agentID string) error {
 	ws, err := b.GetWorkspace(workspaceID)
 	if err != nil {

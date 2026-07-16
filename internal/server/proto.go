@@ -564,6 +564,16 @@ func (c *controllerV1) handlePostWorkspaceAgentUpdate(w http.ResponseWriter, r *
 	w.WriteHeader(http.StatusOK)
 }
 
+// handlePostWorkspaceSkillsReload reloads skills for a workspace.
+func (c *controllerV1) handlePostWorkspaceSkillsReload(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := c.backend.ReloadSkills(r.Context(), id); err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
 // handlePostWorkspaceAgentMain switches the workspace's active agent
 // (e.g. "coder" or "plan").
 func (c *controllerV1) handlePostWorkspaceAgentMain(w http.ResponseWriter, r *http.Request) {

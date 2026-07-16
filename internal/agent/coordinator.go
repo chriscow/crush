@@ -138,6 +138,7 @@ type Coordinator interface {
 	Summarize(context.Context, string) error
 	Model() Model
 	UpdateModels(ctx context.Context) error
+	ReloadSkills(ctx context.Context) error
 	GenerateTitle(ctx context.Context, sessionID, prompt string)
 }
 
@@ -166,6 +167,7 @@ type coordinator struct {
 	allSkills    []*skills.Skill // Pre-filter: all discovered after dedup.
 	activeSkills []*skills.Skill // Post-filter: active skills only.
 	skillTracker *skills.Tracker
+	skillsMgr    *skills.Manager
 
 	readyWg errgroup.Group
 }
@@ -217,15 +219,21 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		allSkills:    allSkills,
 		activeSkills: activeSkills,
 		skillTracker: skillTracker,
+		skillsMgr:    opts.Skills,
 		interactive:  opts.Interactive,
 	}
+
+	logPromptSkillStats(activeSkills)
 
 	agentCfg, ok := opts.Config.Config().Agents[config.AgentCoder]
 	if !ok {
 		return nil, errCoderAgentNotConfigured
 	}
 
-	coderPrompt, err := coderPrompt(prompt.WithWorkingDir(c.cfg.WorkingDir()))
+	coderPrompt, err := coderPrompt(
+		prompt.WithWorkingDir(c.cfg.WorkingDir()),
+		prompt.WithSkills(c.activeSkills),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -1486,6 +1494,55 @@ func (c *coordinator) updateAgentModels(ctx context.Context, agent SessionAgent,
 	return nil
 }
 
+// ReloadSkills re-discovers skills and updates the coder agent's prompt and
+// tools. Skills are a coder-agent concern, so an active plan agent is left
+// unchanged.
+func (c *coordinator) ReloadSkills(ctx context.Context) error {
+	if c.skillsMgr == nil {
+		return errors.New("skill reload requires a skills manager")
+	}
+
+	allSkills, activeSkills, err := c.skillsMgr.Reload(ctx)
+	if err != nil {
+		return err
+	}
+
+	large, _, err := c.buildAgentModels(ctx, false)
+	if err != nil {
+		return err
+	}
+	p, err := coderPrompt(
+		prompt.WithWorkingDir(c.cfg.WorkingDir()),
+		prompt.WithSkills(activeSkills),
+	)
+	if err != nil {
+		return err
+	}
+	systemPrompt, err := p.Build(ctx, large.Model.Provider(), large.Model.Model(), c.cfg)
+	if err != nil {
+		return err
+	}
+
+	agentCfg, ok := c.cfg.Config().Agents[config.AgentCoder]
+	if !ok {
+		return errCoderAgentNotConfigured
+	}
+
+	c.allSkills = allSkills
+	c.activeSkills = activeSkills
+	c.skillTracker = skills.NewTracker(activeSkills)
+	tools, err := c.buildTools(ctx, agentCfg, false)
+	if err != nil {
+		return err
+	}
+
+	coderAgent := c.agents[config.AgentCoder]
+	coderAgent.SetSystemPrompt(systemPrompt)
+	coderAgent.SetTools(tools)
+	logPromptSkillStats(activeSkills)
+	return nil
+}
+
 func (c *coordinator) QueuedPrompts(sessionID string) int {
 	return c.currentAgent().QueuedPrompts(sessionID)
 }
@@ -1889,5 +1946,21 @@ func logDiscoveryStats(
 		"prompt_bytes", len(xml),
 		"prompt_tok_est", skills.ApproxTokenCount(xml),
 		"active_names", activeNames,
+	)
+}
+
+// logPromptSkillStats logs the prompt-injection size of the active skills XML.
+func logPromptSkillStats(activeSkills []*skills.Skill) {
+	xml := skills.ToPromptXML(activeSkills)
+	activeNames := make([]string, len(activeSkills))
+	for i, skill := range activeSkills {
+		activeNames[i] = skill.Name
+	}
+	slog.Info("Skill prompt stats",
+		"component", "skills",
+		"active", len(activeSkills),
+		"active_names", activeNames,
+		"prompt_bytes", len(xml),
+		"prompt_tok_est", skills.ApproxTokenCount(xml),
 	)
 }
