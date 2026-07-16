@@ -96,7 +96,11 @@ type (
 	}
 	ActionInitializeProject struct{}
 	ActionReloadSkills      struct{}
-	ActionSummarize         struct {
+	// ActionSkillToggle toggles a skill's enabled/disabled state.
+	ActionSkillToggle struct {
+		SkillName string
+	}
+	ActionSummarize struct {
 		SessionID string
 	}
 	// ActionForkSession creates an independent copy of the current session.
