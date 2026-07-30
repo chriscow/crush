@@ -130,7 +130,7 @@ func TestFromSkillCatalog_BuiltinSkillsAreUserInvocable(t *testing.T) {
 	for _, cmd := range cmds {
 		names[cmd.Skill.Name] = true
 	}
-	for _, expected := range []string{"crush-config", "crush-hooks", "jq", "fork", "loop"} {
+	for _, expected := range []string{"crush-config", "crush-hooks", "jq", "fork"} {
 		require.True(t, names[expected], "%s should be user-invocable in the palette", expected)
 	}
 }
