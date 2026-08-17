@@ -446,6 +446,19 @@ func TestDiscoverBuiltin(t *testing.T) {
 		}
 	}
 	require.True(t, foundHooks, "crush-hooks builtin skill not found")
+
+	var foundFork bool
+	for _, s := range discovered {
+		if s.Name == "fork" {
+			foundFork = true
+			require.Equal(t, "crush://skills/fork/SKILL.md", s.SkillFilePath)
+			require.Equal(t, "crush://skills/fork", s.Path)
+			require.NotEmpty(t, s.Description)
+			require.NotEmpty(t, s.Instructions)
+			require.True(t, s.Builtin)
+		}
+	}
+	require.True(t, foundFork, "fork builtin skill not found")
 }
 
 func TestDeduplicate(t *testing.T) {

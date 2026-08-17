@@ -89,6 +89,22 @@ func (m *mockSessionService) IsAgentToolSession(sessionID string) bool {
 	return ok
 }
 
+func (m *mockSessionService) Fork(_ context.Context, sessionID string) (session.Session, error) {
+	// Find the session to fork
+	for _, s := range m.sessions {
+		if s.ID == sessionID {
+			// Create a new session with the same title
+			forked := session.Session{
+				ID:    "forked-" + sessionID,
+				Title: s.Title + " (fork)",
+			}
+			m.created = append(m.created, forked)
+			return forked, nil
+		}
+	}
+	return session.Session{}, sql.ErrNoRows
+}
+
 func newTestApp(sessions session.Service) *App {
 	return &App{Sessions: sessions}
 }

@@ -62,6 +62,10 @@ type (
 	ActionSummarize                   struct {
 		SessionID string
 	}
+	// ActionForkSession creates an independent copy of the current session.
+	ActionForkSession struct {
+		SessionID string
+	}
 	// ActionSelectReasoningEffort is a message indicating a reasoning effort
 	// has been selected.
 	ActionSelectReasoningEffort struct {
