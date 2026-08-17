@@ -40,3 +40,5 @@ These are always available without user configuration.
 | `crush-config` | `builtin/crush-config/` | Crush configuration help                   |
 | `crush-hooks`  | `builtin/crush-hooks/`  | Authoring, configuring and debugging hooks |
 | `jq`           | `builtin/jq/`           | jq JSON processor usage guide              |
+| `fork`         | `builtin/fork/`         | Fork session to create independent copy    |
+| `loop`         | `builtin/loop/`         | Schedule repetitive prompts during session |

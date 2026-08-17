@@ -156,6 +156,15 @@ func (c *controllerV1) endpoints() []apigen.Endpoint {
 			Fails(404, 500).
 			Handle(c.handleDeleteWorkspaceSession),
 
+		apigen.Post("/v1/workspaces/{id}/sessions/{sid}/fork").
+			Summary("Fork session").
+			Tags("sessions").
+			PathParam("id", "Workspace ID").
+			PathParam("sid", "Session ID").
+			Responds(proto.Session{}).
+			Fails(404, 500).
+			Handle(c.handlePostWorkspaceSessionFork),
+
 		apigen.Get("/v1/workspaces/{id}/sessions/{sid}/history").
 			Summary("Get session history").
 			Tags("sessions").

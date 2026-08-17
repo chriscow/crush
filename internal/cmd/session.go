@@ -43,6 +43,7 @@ var (
 	sessionLastJSON   bool
 	sessionDeleteJSON bool
 	sessionRenameJSON bool
+	sessionForkJSON   bool
 )
 
 var sessionListCmd = &cobra.Command{
@@ -85,17 +86,27 @@ var sessionRenameCmd = &cobra.Command{
 	RunE:  runSessionRename,
 }
 
+var sessionForkCmd = &cobra.Command{
+	Use:   "fork <id>",
+	Short: "Fork a session",
+	Long:  "Create an independent copy of a session with full conversation history. Use --json for machine-readable output. ID can be a UUID, full hash, or hash prefix.",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runSessionFork,
+}
+
 func init() {
 	sessionListCmd.Flags().BoolVar(&sessionListJSON, "json", false, "output in JSON format")
 	sessionShowCmd.Flags().BoolVar(&sessionShowJSON, "json", false, "output in JSON format")
 	sessionLastCmd.Flags().BoolVar(&sessionLastJSON, "json", false, "output in JSON format")
 	sessionDeleteCmd.Flags().BoolVar(&sessionDeleteJSON, "json", false, "output in JSON format")
 	sessionRenameCmd.Flags().BoolVar(&sessionRenameJSON, "json", false, "output in JSON format")
+	sessionForkCmd.Flags().BoolVar(&sessionForkJSON, "json", false, "output in JSON format")
 	sessionCmd.AddCommand(sessionListCmd)
 	sessionCmd.AddCommand(sessionShowCmd)
 	sessionCmd.AddCommand(sessionLastCmd)
 	sessionCmd.AddCommand(sessionDeleteCmd)
 	sessionCmd.AddCommand(sessionRenameCmd)
+	sessionCmd.AddCommand(sessionForkCmd)
 }
 
 type sessionServices struct {
@@ -215,6 +226,7 @@ type sessionMutationResult struct {
 	Title   string `json:"title"`
 	Deleted bool   `json:"deleted,omitempty"`
 	Renamed bool   `json:"renamed,omitempty"`
+	Forked  bool   `json:"forked,omitempty"`
 }
 
 // resolveSessionID resolves a session ID that can be a UUID, full hash, or hash prefix.
@@ -360,6 +372,47 @@ func runSessionRename(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Fprintf(out, "Renamed session %s to %q\n", session.HashID(sess.ID)[:12], newTitle)
+	return nil
+}
+
+func runSessionFork(cmd *cobra.Command, args []string) error {
+	event.SetNonInteractive(true)
+
+	ctx, svc, cleanup, err := sessionSetup(cmd)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	sess, err := resolveSessionID(ctx, svc.sessions, args[0])
+	if err != nil {
+		return err
+	}
+	if err := svc.messages.FlushAll(ctx); err != nil {
+		return fmt.Errorf("failed to flush session messages: %w", err)
+	}
+
+	forkedSess, err := svc.sessions.Fork(ctx, sess.ID)
+	if err != nil {
+		return fmt.Errorf("failed to fork session: %w", err)
+	}
+
+	out := cmd.OutOrStdout()
+	if sessionForkJSON {
+		enc := json.NewEncoder(out)
+		enc.SetEscapeHTML(false)
+		return enc.Encode(sessionMutationResult{
+			ID:     session.HashID(forkedSess.ID),
+			UUID:   forkedSess.ID,
+			Title:  forkedSess.Title,
+			Forked: true,
+		})
+	}
+
+	fmt.Fprintf(out, "Forked session %s to new session %s (%q)\n",
+		session.HashID(sess.ID)[:12],
+		session.HashID(forkedSess.ID)[:12],
+		forkedSess.Title)
 	return nil
 }
 

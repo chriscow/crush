@@ -141,6 +141,11 @@ type shellStreamMsg struct {
 	streamCh  <-chan string // unexported; used to continue draining
 }
 
+// forkedSessionInfo is sent when a session has been forked and we should switch to it.
+type forkedSessionInfo struct {
+	Session session.Session
+}
+
 type (
 	// cancelTimerExpiredMsg is sent when the cancel timer expires.
 	cancelTimerExpiredMsg struct{}
@@ -1097,6 +1102,11 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.handleQuestionNotification(msg.Payload)
 	case cancelTimerExpiredMsg:
 		m.isCanceling = false
+	case forkedSessionInfo:
+		// Switch to the forked session
+		m.session = &msg.Session
+		cmds = append(cmds, m.loadSession(msg.Session.ID))
+		cmds = append(cmds, util.ReportInfo("Switched to forked session"))
 	case tea.TerminalVersionMsg:
 		termVersion := strings.ToLower(msg.Name)
 		// Only enable progress bar for the following terminals.
@@ -2133,6 +2143,24 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			}
 			return nil
 		})
+		m.dialog.CloseDialog(dialog.CommandsID)
+	case dialog.ActionForkSession:
+		if m.isAgentBusy() {
+			cmds = append(cmds, util.ReportWarn("Agent is busy, please wait before forking session..."))
+			break
+		}
+		cmds = append(cmds, func() tea.Msg {
+			forked, err := m.com.Workspace.ForkSession(context.Background(), msg.SessionID)
+			if err != nil {
+				return util.ReportError(err)()
+			}
+			// Return the forked session so we can switch to it
+			return forkedSessionInfo{Session: forked}
+		})
+		m.dialog.CloseDialog(dialog.CommandsID)
+	case dialog.ActionLoopList:
+		// TODO: Implement loop list dialog
+		cmds = append(cmds, util.ReportInfo("Loop tasks: feature coming soon"))
 		m.dialog.CloseDialog(dialog.CommandsID)
 	case dialog.ActionToggleHelp:
 		m.status.ToggleHelp()

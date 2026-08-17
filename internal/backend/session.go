@@ -111,6 +111,19 @@ func (b *Backend) DeleteSession(ctx context.Context, workspaceID, sessionID stri
 	return ws.Sessions.Delete(ctx, sessionID)
 }
 
+// ForkSession creates a fork of a session.
+func (b *Backend) ForkSession(ctx context.Context, workspaceID, sessionID string) (session.Session, error) {
+	ws, err := b.GetWorkspace(workspaceID)
+	if err != nil {
+		return session.Session{}, err
+	}
+	if err := ws.Messages.FlushAll(ctx); err != nil {
+		return session.Session{}, err
+	}
+
+	return ws.Sessions.Fork(ctx, sessionID)
+}
+
 // ListUserMessages returns user-role messages for a session.
 func (b *Backend) ListUserMessages(ctx context.Context, workspaceID, sessionID string) ([]message.Message, error) {
 	ws, err := b.GetWorkspace(workspaceID)

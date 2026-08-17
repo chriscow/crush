@@ -11,6 +11,7 @@ import (
 type Querier interface {
 	CreateFile(ctx context.Context, arg CreateFileParams) (File, error)
 	CreateMessage(ctx context.Context, arg CreateMessageParams) (Message, error)
+	CreateMessageAt(ctx context.Context, arg CreateMessageAtParams) (Message, error)
 	CreateSession(ctx context.Context, arg CreateSessionParams) (Session, error)
 	DeleteFile(ctx context.Context, id string) error
 	DeleteMessage(ctx context.Context, id string) error

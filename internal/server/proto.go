@@ -380,6 +380,28 @@ func (c *controllerV1) handleDeleteWorkspaceSession(w http.ResponseWriter, r *ht
 	w.WriteHeader(http.StatusOK)
 }
 
+// handlePostWorkspaceSessionFork forks a session.
+//
+//	@Summary		Fork a session
+//	@Tags			sessions
+//	@Produce		json
+//	@Param			id	path		string	true	"Workspace ID"
+//	@Param			sid	path		string	true	"Session ID"
+//	@Success		200	{object}	session.Session
+//	@Failure		404	{object}	proto.Error
+//	@Failure		500	{object}	proto.Error
+//	@Router			/workspaces/{id}/sessions/{sid}/fork [post]
+func (c *controllerV1) handlePostWorkspaceSessionFork(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sid := r.PathValue("sid")
+	forked, err := c.backend.ForkSession(r.Context(), id, sid)
+	if err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+	jsonEncode(w, forked)
+}
+
 // handleGetWorkspaceSessionUserMessages returns user messages for a session.
 func (c *controllerV1) handleGetWorkspaceSessionUserMessages(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")

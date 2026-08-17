@@ -67,6 +67,66 @@ func (q *Queries) CreateMessage(ctx context.Context, arg CreateMessageParams) (M
 	return i, err
 }
 
+const createMessageAt = `-- name: CreateMessageAt :one
+INSERT INTO messages (
+    id,
+    session_id,
+    role,
+    parts,
+    model,
+    provider,
+    is_summary_message,
+    created_at,
+    updated_at,
+    finished_at
+) VALUES (
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+)
+RETURNING id, session_id, role, parts, model, created_at, updated_at, finished_at, provider, is_summary_message
+`
+
+type CreateMessageAtParams struct {
+	ID               string         `json:"id"`
+	SessionID        string         `json:"session_id"`
+	Role             string         `json:"role"`
+	Parts            string         `json:"parts"`
+	Model            sql.NullString `json:"model"`
+	Provider         sql.NullString `json:"provider"`
+	IsSummaryMessage int64          `json:"is_summary_message"`
+	CreatedAt        int64          `json:"created_at"`
+	UpdatedAt        int64          `json:"updated_at"`
+	FinishedAt       sql.NullInt64  `json:"finished_at"`
+}
+
+func (q *Queries) CreateMessageAt(ctx context.Context, arg CreateMessageAtParams) (Message, error) {
+	row := q.queryRow(ctx, q.createMessageAtStmt, createMessageAt,
+		arg.ID,
+		arg.SessionID,
+		arg.Role,
+		arg.Parts,
+		arg.Model,
+		arg.Provider,
+		arg.IsSummaryMessage,
+		arg.CreatedAt,
+		arg.UpdatedAt,
+		arg.FinishedAt,
+	)
+	var i Message
+	err := row.Scan(
+		&i.ID,
+		&i.SessionID,
+		&i.Role,
+		&i.Parts,
+		&i.Model,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.FinishedAt,
+		&i.Provider,
+		&i.IsSummaryMessage,
+	)
+	return i, err
+}
+
 const deleteMessage = `-- name: DeleteMessage :exec
 DELETE FROM messages
 WHERE id = ?
@@ -197,7 +257,7 @@ const listMessagesBySession = `-- name: ListMessagesBySession :many
 SELECT id, session_id, role, parts, model, created_at, updated_at, finished_at, provider, is_summary_message, prism_model_id, prism_model_name, prism_hypercredit_savings, prism_dollar_savings
 FROM messages
 WHERE session_id = ?
-ORDER BY created_at ASC
+ORDER BY created_at ASC, rowid ASC
 `
 
 func (q *Queries) ListMessagesBySession(ctx context.Context, sessionID string) ([]Message, error) {

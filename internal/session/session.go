@@ -81,6 +81,99 @@ type Service interface {
 	CreateAgentToolSessionID(messageID, toolCallID string) string
 	ParseAgentToolSessionID(sessionID string) (messageID string, toolCallID string, ok bool)
 	IsAgentToolSession(sessionID string) bool
+
+	// Fork creates an independent copy of a session with all its messages.
+	// The new session has its own ID but contains the full conversation history.
+	Fork(ctx context.Context, sessionID string) (Session, error)
+}
+
+// Fork creates an independent copy of a session with all its messages.
+// The new session gets a new UUID but contains all messages from the original.
+func (s *service) Fork(ctx context.Context, sessionID string) (Session, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Session{}, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	qtx := s.q.WithTx(tx)
+	dbOriginal, err := qtx.GetSessionByID(ctx, sessionID)
+	if err != nil {
+		return Session{}, fmt.Errorf("failed to get session: %w", err)
+	}
+	original := s.fromDBItem(dbOriginal)
+	s.applyEstimatedUsageState(&original)
+
+	forkTitle := original.Title + " (fork)"
+	newID := uuid.New().String()
+	if _, err := qtx.CreateSession(ctx, db.CreateSessionParams{
+		ID:               newID,
+		Title:            forkTitle,
+		PromptTokens:     original.PromptTokens,
+		CompletionTokens: original.CompletionTokens,
+		Cost:             original.Cost,
+	}); err != nil {
+		return Session{}, fmt.Errorf("failed to create forked session: %w", err)
+	}
+
+	messages, err := qtx.ListMessagesBySession(ctx, sessionID)
+	if err != nil {
+		return Session{}, fmt.Errorf("failed to list messages: %w", err)
+	}
+
+	messageIDMap := make(map[string]string, len(messages))
+	for _, msg := range messages {
+		newMessageID := uuid.New().String()
+		messageIDMap[msg.ID] = newMessageID
+		if _, err := qtx.CreateMessageAt(ctx, db.CreateMessageAtParams{
+			ID:               newMessageID,
+			SessionID:        newID,
+			Role:             msg.Role,
+			Parts:            msg.Parts,
+			Model:            msg.Model,
+			Provider:         msg.Provider,
+			IsSummaryMessage: msg.IsSummaryMessage,
+			CreatedAt:        msg.CreatedAt,
+			UpdatedAt:        msg.UpdatedAt,
+			FinishedAt:       msg.FinishedAt,
+		}); err != nil {
+			return Session{}, fmt.Errorf("failed to copy message %s: %w", msg.ID, err)
+		}
+	}
+
+	summaryMessageID := ""
+	if remapped, ok := messageIDMap[original.SummaryMessageID]; ok {
+		summaryMessageID = remapped
+	}
+
+	todosJSON, err := marshalTodos(original.Todos)
+	if err != nil {
+		return Session{}, fmt.Errorf("failed to marshal todos: %w", err)
+	}
+
+	dbSession, err := qtx.UpdateSession(ctx, db.UpdateSessionParams{
+		ID:               newID,
+		Title:            forkTitle,
+		PromptTokens:     original.PromptTokens,
+		CompletionTokens: original.CompletionTokens,
+		SummaryMessageID: sql.NullString{String: summaryMessageID, Valid: summaryMessageID != ""},
+		Cost:             original.Cost,
+		Todos:            sql.NullString{String: todosJSON, Valid: todosJSON != ""},
+	})
+	if err != nil {
+		return Session{}, fmt.Errorf("failed to update forked session: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return Session{}, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	forked := s.fromDBItem(dbSession)
+	forked.EstimatedUsage = original.EstimatedUsage
+	s.setEstimatedUsageState(newID, original.EstimatedUsage)
+	s.Publish(pubsub.CreatedEvent, forked)
+	event.SessionCreated()
+	return forked, nil
 }
 
 type service struct {

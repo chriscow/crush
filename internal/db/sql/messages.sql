@@ -7,7 +7,7 @@ WHERE id = ? LIMIT 1;
 SELECT *
 FROM messages
 WHERE session_id = ?
-ORDER BY created_at ASC;
+ORDER BY created_at ASC, rowid ASC;
 
 -- name: ListMessagesBySessionFromSummary :many
 -- Messages from the summary onward, which is all a compacted session sends.
@@ -32,6 +32,23 @@ INSERT INTO messages (
     updated_at
 ) VALUES (
     ?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'), strftime('%s', 'now')
+)
+RETURNING *;
+
+-- name: CreateMessageAt :one
+INSERT INTO messages (
+    id,
+    session_id,
+    role,
+    parts,
+    model,
+    provider,
+    is_summary_message,
+    created_at,
+    updated_at,
+    finished_at
+) VALUES (
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 )
 RETURNING *;
 
