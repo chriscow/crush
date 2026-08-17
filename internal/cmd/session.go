@@ -394,10 +394,10 @@ func runSessionFork(cmd *cobra.Command, args []string) error {
 		enc := json.NewEncoder(out)
 		enc.SetEscapeHTML(false)
 		return enc.Encode(sessionMutationResult{
-			ID:      session.HashID(forkedSess.ID),
-			UUID:    forkedSess.ID,
-			Title:   forkedSess.Title,
-			Forked:  true,
+			ID:     session.HashID(forkedSess.ID),
+			UUID:   forkedSess.ID,
+			Title:  forkedSess.Title,
+			Forked: true,
 		})
 	}
 
