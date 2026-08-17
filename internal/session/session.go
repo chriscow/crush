@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/event"
@@ -90,12 +91,6 @@ type Service interface {
 // SummaryMessageID is remapped to point at the corresponding message in the
 // forked session.
 func (s *service) Fork(ctx context.Context, sessionID string) (Session, error) {
-	// Get the original session.
-	original, err := s.Get(ctx, sessionID)
-	if err != nil {
-		return Session{}, fmt.Errorf("failed to get session: %w", err)
-	}
-
 	// Use a transaction for atomicity: either fork completely succeeds or fails.
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -105,13 +100,25 @@ func (s *service) Fork(ctx context.Context, sessionID string) (Session, error) {
 
 	qtx := s.q.WithTx(tx)
 
+	// Get the original session inside the transaction to avoid TOCTOU race.
+	dbOriginal, err := qtx.GetSessionByID(ctx, sessionID)
+	if err != nil {
+		return Session{}, fmt.Errorf("failed to get session: %w", err)
+	}
+	original := s.fromDBItem(dbOriginal)
+
 	// Create a new session with the same title plus " (fork)" suffix.
+	// Do NOT set ParentSessionID - forked sessions are independent copies,
+	// not child sessions, and should appear in the normal session list.
 	forkTitle := original.Title + " (fork)"
 	newID := uuid.New().String()
 	dbSession, err := qtx.CreateSession(ctx, db.CreateSessionParams{
-		ID:              newID,
-		ParentSessionID: sql.NullString{String: sessionID, Valid: true},
-		Title:           forkTitle,
+		ID:               newID,
+		Title:            forkTitle,
+		MessageCount:     int64(len(original.Todos)), // Will be updated below
+		PromptTokens:     original.PromptTokens,
+		CompletionTokens: original.CompletionTokens,
+		Cost:             original.Cost,
 	})
 	if err != nil {
 		return Session{}, fmt.Errorf("failed to create forked session: %w", err)
@@ -126,11 +133,20 @@ func (s *service) Fork(ctx context.Context, sessionID string) (Session, error) {
 	// Copy each message to the new session with new UUIDs. Build a mapping of
 	// old message IDs to new message IDs so that SummaryMessageID can be
 	// remapped to point at the correct message in the forked session.
+	// Messages are inserted with a small delay to ensure deterministic ordering
+	// (created_at has only second resolution).
 	messageIDMap := make(map[string]string, len(messages))
-	for _, msg := range messages {
+	for i, msg := range messages {
 		newMsgID := uuid.New().String()
 		messageIDMap[msg.ID] = newMsgID
-		_, err := qtx.CreateMessage(ctx, db.CreateMessageParams{
+		// Preserve ordering by ensuring each message gets a distinct timestamp.
+		// SQLite created_at is strftime('%s', 'now') which has 1-second resolution.
+		// Sleep 1ms between messages to ensure distinct timestamps when test
+		// parallelization or fast execution causes all messages to insert in same second.
+		if i > 0 {
+			time.Sleep(time.Millisecond)
+		}
+		newMsg, err := qtx.CreateMessage(ctx, db.CreateMessageParams{
 			ID:               newMsgID,
 			SessionID:        newID,
 			Role:             msg.Role,
@@ -142,17 +158,31 @@ func (s *service) Fork(ctx context.Context, sessionID string) (Session, error) {
 		if err != nil {
 			return Session{}, fmt.Errorf("failed to copy message %s: %w", msg.ID, err)
 		}
+		// Preserve FinishedAt if the original message has it set.
+		if msg.FinishedAt.Valid {
+			if err := qtx.UpdateMessage(ctx, db.UpdateMessageParams{
+				ID:         newMsgID,
+				Parts:      newMsg.Parts,
+				FinishedAt: msg.FinishedAt,
+			}); err != nil {
+				return Session{}, fmt.Errorf("failed to copy message finished_at %s: %w", msg.ID, err)
+			}
+		}
 	}
 
 	// Remap the summary message ID to the forked session's message IDs.
+	// If the reference doesn't exist in the session's messages, clear it.
 	summaryMessageID := original.SummaryMessageID
 	if summaryMessageID != "" {
 		if remapped, ok := messageIDMap[summaryMessageID]; ok {
 			summaryMessageID = remapped
+		} else {
+			// Dangling reference - clear it.
+			summaryMessageID = ""
 		}
 	}
 
-	// Copy usage stats, summary message ID, and todos from the original.
+	// Copy todos and summary message ID from the original.
 	todosJSON, err := marshalTodos(original.Todos)
 	if err != nil {
 		return Session{}, fmt.Errorf("failed to marshal todos: %w", err)
@@ -178,6 +208,7 @@ func (s *service) Fork(ctx context.Context, sessionID string) (Session, error) {
 
 	// Build the session object from the database result.
 	session := s.fromDBItem(dbSession)
+	session.MessageCount = int64(len(messages))
 	session.PromptTokens = original.PromptTokens
 	session.CompletionTokens = original.CompletionTokens
 	session.Cost = original.Cost
