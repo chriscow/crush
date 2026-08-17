@@ -188,3 +188,84 @@ func TestForkNonExistentSession(t *testing.T) {
 	_, err = sessions.Fork(t.Context(), "non-existent-id")
 	require.Error(t, err)
 }
+
+func TestForkEmptySession(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Cleanup(func() {
+		require.NoError(t, db.Release(dataDir))
+		db.ResetPool()
+	})
+
+	conn, err := db.Connect(t.Context(), dataDir)
+	require.NoError(t, err)
+
+	q := db.New(conn)
+	sessions := NewService(q, conn)
+
+	// Create an empty session with no messages
+	original, err := sessions.Create(t.Context(), "Empty Session")
+	require.NoError(t, err)
+
+	// Fork the empty session
+	forked, err := sessions.Fork(t.Context(), original.ID)
+	require.NoError(t, err)
+	require.NotEqual(t, original.ID, forked.ID)
+	require.Equal(t, "Empty Session (fork)", forked.Title)
+
+	// Verify no messages in the forked session
+	forkedMsgs, err := message.NewService(q).List(t.Context(), forked.ID)
+	require.NoError(t, err)
+	require.Empty(t, forkedMsgs)
+}
+
+func TestForkPreservesTodosAndSummaryMessageID(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Cleanup(func() {
+		require.NoError(t, db.Release(dataDir))
+		db.ResetPool()
+	})
+
+	conn, err := db.Connect(t.Context(), dataDir)
+	require.NoError(t, err)
+
+	q := db.New(conn)
+	sessions := NewService(q, conn)
+	messages := message.NewService(q)
+
+	original, err := sessions.Create(t.Context(), "Test Session")
+	require.NoError(t, err)
+
+	// Add a summary message
+	summaryMsg, err := messages.Create(t.Context(), original.ID, message.CreateMessageParams{
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: "Summary"},
+		},
+	})
+	require.NoError(t, err)
+
+	original.SummaryMessageID = summaryMsg.ID
+	original.Todos = []Todo{
+		{Content: "Task 1", Status: TodoStatusCompleted},
+		{Content: "Task 2", Status: TodoStatusInProgress},
+	}
+	original, err = sessions.Save(t.Context(), original)
+	require.NoError(t, err)
+
+	// Fork the session
+	forked, err := sessions.Fork(t.Context(), original.ID)
+	require.NoError(t, err)
+
+	// Verify todos were copied
+	require.Equal(t, original.Todos, forked.Todos)
+
+	// Verify SummaryMessageID was remapped to the forked message
+	require.NotEqual(t, original.SummaryMessageID, forked.SummaryMessageID)
+	require.NotEmpty(t, forked.SummaryMessageID)
+
+	// Verify the remapped summary message ID exists in the forked session
+	forkedMsgs, err := messages.List(t.Context(), forked.ID)
+	require.NoError(t, err)
+	require.Len(t, forkedMsgs, 1)
+	require.Equal(t, forked.SummaryMessageID, forkedMsgs[0].ID)
+}

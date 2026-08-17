@@ -87,14 +87,16 @@ type Service interface {
 
 // Fork creates an independent copy of a session with all its messages.
 // The new session gets a new UUID but contains all messages from the original.
+// SummaryMessageID is remapped to point at the corresponding message in the
+// forked session.
 func (s *service) Fork(ctx context.Context, sessionID string) (Session, error) {
-	// Get the original session
+	// Get the original session.
 	original, err := s.Get(ctx, sessionID)
 	if err != nil {
 		return Session{}, fmt.Errorf("failed to get session: %w", err)
 	}
 
-	// Use a transaction for atomicity - either fork completely succeeds or fails
+	// Use a transaction for atomicity: either fork completely succeeds or fails.
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Session{}, fmt.Errorf("failed to begin transaction: %w", err)
@@ -103,27 +105,33 @@ func (s *service) Fork(ctx context.Context, sessionID string) (Session, error) {
 
 	qtx := s.q.WithTx(tx)
 
-	// Create a new session with the same title plus timestamp for uniqueness
+	// Create a new session with the same title plus " (fork)" suffix.
 	forkTitle := original.Title + " (fork)"
 	newID := uuid.New().String()
 	dbSession, err := qtx.CreateSession(ctx, db.CreateSessionParams{
-		ID:    newID,
-		Title: forkTitle,
+		ID:              newID,
+		ParentSessionID: sql.NullString{String: sessionID, Valid: true},
+		Title:           forkTitle,
 	})
 	if err != nil {
 		return Session{}, fmt.Errorf("failed to create forked session: %w", err)
 	}
 
-	// Get all messages from the original session
+	// Get all messages from the original session.
 	messages, err := qtx.ListMessagesBySession(ctx, sessionID)
 	if err != nil {
 		return Session{}, fmt.Errorf("failed to list messages: %w", err)
 	}
 
-	// Copy each message to the new session with new UUIDs to avoid collisions
+	// Copy each message to the new session with new UUIDs. Build a mapping of
+	// old message IDs to new message IDs so that SummaryMessageID can be
+	// remapped to point at the correct message in the forked session.
+	messageIDMap := make(map[string]string, len(messages))
 	for _, msg := range messages {
+		newMsgID := uuid.New().String()
+		messageIDMap[msg.ID] = newMsgID
 		_, err := qtx.CreateMessage(ctx, db.CreateMessageParams{
-			ID:               uuid.New().String(), // Always generate new UUID
+			ID:               newMsgID,
 			SessionID:        newID,
 			Role:             msg.Role,
 			Parts:            msg.Parts,
@@ -136,7 +144,15 @@ func (s *service) Fork(ctx context.Context, sessionID string) (Session, error) {
 		}
 	}
 
-	// Copy usage stats, summary message ID, and todos from the original
+	// Remap the summary message ID to the forked session's message IDs.
+	summaryMessageID := original.SummaryMessageID
+	if summaryMessageID != "" {
+		if remapped, ok := messageIDMap[summaryMessageID]; ok {
+			summaryMessageID = remapped
+		}
+	}
+
+	// Copy usage stats, summary message ID, and todos from the original.
 	todosJSON, err := marshalTodos(original.Todos)
 	if err != nil {
 		return Session{}, fmt.Errorf("failed to marshal todos: %w", err)
@@ -147,7 +163,7 @@ func (s *service) Fork(ctx context.Context, sessionID string) (Session, error) {
 		Title:            forkTitle,
 		PromptTokens:     original.PromptTokens,
 		CompletionTokens: original.CompletionTokens,
-		SummaryMessageID: sql.NullString{String: original.SummaryMessageID, Valid: original.SummaryMessageID != ""},
+		SummaryMessageID: sql.NullString{String: summaryMessageID, Valid: summaryMessageID != ""},
 		Cost:             original.Cost,
 		Todos:            sql.NullString{String: todosJSON, Valid: todosJSON != ""},
 	})
@@ -155,21 +171,24 @@ func (s *service) Fork(ctx context.Context, sessionID string) (Session, error) {
 		return Session{}, fmt.Errorf("failed to update fork stats: %w", err)
 	}
 
-	// Commit the transaction
+	// Commit the transaction.
 	if err := tx.Commit(); err != nil {
 		return Session{}, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	// Build the session object from the database result
+	// Build the session object from the database result.
 	session := s.fromDBItem(dbSession)
 	session.PromptTokens = original.PromptTokens
 	session.CompletionTokens = original.CompletionTokens
 	session.Cost = original.Cost
-	session.SummaryMessageID = original.SummaryMessageID
+	session.SummaryMessageID = summaryMessageID
 	session.Todos = original.Todos
+	session.EstimatedUsage = original.EstimatedUsage
+	s.setEstimatedUsageState(newID, original.EstimatedUsage)
 
-	// Publish the creation event
+	// Publish the creation event and telemetry.
 	s.Publish(pubsub.CreatedEvent, session)
+	event.SessionCreated()
 
 	return session, nil
 }
