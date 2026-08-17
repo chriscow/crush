@@ -446,6 +446,19 @@ func TestDiscoverBuiltin(t *testing.T) {
 		}
 	}
 	require.True(t, foundHooks, "crush-hooks builtin skill not found")
+
+	var foundLoop bool
+	for _, s := range discovered {
+		if s.Name == "loop" {
+			foundLoop = true
+			require.Equal(t, "crush://skills/loop/SKILL.md", s.SkillFilePath)
+			require.Equal(t, "crush://skills/loop", s.Path)
+			require.NotEmpty(t, s.Description)
+			require.NotEmpty(t, s.Instructions)
+			require.True(t, s.Builtin)
+		}
+	}
+	require.True(t, foundLoop, "loop builtin skill not found")
 }
 
 func TestDeduplicate(t *testing.T) {

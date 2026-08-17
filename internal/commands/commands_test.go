@@ -107,8 +107,18 @@ func TestFromSkillCatalog_UsesDiscoveredSymlinkedSkills(t *testing.T) {
 	entries := skills.Catalog(activeSkills, []string{root}, "")
 	cmds := FromSkillCatalog(entries)
 
-	require.Len(t, cmds, 1)
-	require.Equal(t, "user:linked-skill", cmds[0].ID)
-	require.Equal(t, "linked-skill", cmds[0].Skill.Name)
-	require.Equal(t, filepath.Join(link, skills.SkillFileName), cmds[0].Skill.SkillFilePath)
+	// Should include builtin skills (loop) plus the symlinked skill
+	require.GreaterOrEqual(t, len(cmds), 1)
+
+	// Find the linked-skill in the results
+	var linkedCmd *CustomCommand
+	for i := range cmds {
+		if cmds[i].Skill.Name == "linked-skill" {
+			linkedCmd = &cmds[i]
+			break
+		}
+	}
+	require.NotNil(t, linkedCmd, "linked-skill should be in results")
+	require.Equal(t, "user:linked-skill", linkedCmd.ID)
+	require.Equal(t, filepath.Join(link, skills.SkillFileName), linkedCmd.Skill.SkillFilePath)
 }

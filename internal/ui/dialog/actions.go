@@ -62,6 +62,21 @@ type (
 	ActionSummarize                   struct {
 		SessionID string
 	}
+	// ActionLoopList shows active loop tasks for the session.
+	ActionLoopList struct {
+		SessionID string
+	}
+	// ActionLoopSchedule schedules a new loop task.
+	ActionLoopSchedule struct {
+		SessionID string
+		Interval  string
+		Prompt    string
+	}
+	// ActionLoopCancel cancels a loop task.
+	ActionLoopCancel struct {
+		SessionID string
+		TaskID    string
+	}
 	// ActionSelectReasoningEffort is a message indicating a reasoning effort
 	// has been selected.
 	ActionSelectReasoningEffort struct {
