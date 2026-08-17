@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/pubsub"
+	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/x/powernap/pkg/lsp/protocol"
 )
 
@@ -813,6 +814,23 @@ func (c *Client) DeleteSession(ctx context.Context, id string, sessionID string)
 		return fmt.Errorf("failed to delete session: status code %d", rsp.StatusCode)
 	}
 	return nil
+}
+
+// ForkSession creates a fork of a session.
+func (c *Client) ForkSession(ctx context.Context, id string, sessionID string) (session.Session, error) {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/sessions/%s/fork", id, sessionID), nil, nil, nil)
+	if err != nil {
+		return session.Session{}, fmt.Errorf("failed to fork session: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return session.Session{}, fmt.Errorf("failed to fork session: status code %d", rsp.StatusCode)
+	}
+	var forked session.Session
+	if err := json.NewDecoder(rsp.Body).Decode(&forked); err != nil && !errors.Is(err, io.EOF) {
+		return session.Session{}, fmt.Errorf("failed to decode forked session: %w", err)
+	}
+	return forked, nil
 }
 
 // ListUserMessages retrieves user-role messages for a session as proto types.

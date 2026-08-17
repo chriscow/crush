@@ -64,6 +64,10 @@ func (w *AppWorkspace) DeleteSession(ctx context.Context, sessionID string) erro
 	return w.app.Sessions.Delete(ctx, sessionID)
 }
 
+func (w *AppWorkspace) ForkSession(ctx context.Context, sessionID string) (session.Session, error) {
+	return w.app.Sessions.Fork(ctx, sessionID)
+}
+
 func (w *AppWorkspace) CreateAgentToolSessionID(messageID, toolCallID string) string {
 	return w.app.Sessions.CreateAgentToolSessionID(messageID, toolCallID)
 }

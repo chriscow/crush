@@ -171,6 +171,10 @@ func (w *ClientWorkspace) DeleteSession(ctx context.Context, sessionID string) e
 	return w.client.DeleteSession(ctx, w.workspaceID(), sessionID)
 }
 
+func (w *ClientWorkspace) ForkSession(ctx context.Context, sessionID string) (session.Session, error) {
+	return w.client.ForkSession(ctx, w.workspaceID(), sessionID)
+}
+
 func (w *ClientWorkspace) CreateAgentToolSessionID(messageID, toolCallID string) string {
 	return fmt.Sprintf("%s$$%s", messageID, toolCallID)
 }

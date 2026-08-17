@@ -79,6 +79,99 @@ type Service interface {
 	CreateAgentToolSessionID(messageID, toolCallID string) string
 	ParseAgentToolSessionID(sessionID string) (messageID string, toolCallID string, ok bool)
 	IsAgentToolSession(sessionID string) bool
+
+	// Fork creates an independent copy of a session with all its messages.
+	// The new session has its own ID but contains the full conversation history.
+	Fork(ctx context.Context, sessionID string) (Session, error)
+}
+
+// Fork creates an independent copy of a session with all its messages.
+// The new session gets a new UUID but contains all messages from the original.
+func (s *service) Fork(ctx context.Context, sessionID string) (Session, error) {
+	// Get the original session
+	original, err := s.Get(ctx, sessionID)
+	if err != nil {
+		return Session{}, fmt.Errorf("failed to get session: %w", err)
+	}
+
+	// Use a transaction for atomicity - either fork completely succeeds or fails
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Session{}, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	qtx := s.q.WithTx(tx)
+
+	// Create a new session with the same title plus timestamp for uniqueness
+	forkTitle := original.Title + " (fork)"
+	newID := uuid.New().String()
+	dbSession, err := qtx.CreateSession(ctx, db.CreateSessionParams{
+		ID:    newID,
+		Title: forkTitle,
+	})
+	if err != nil {
+		return Session{}, fmt.Errorf("failed to create forked session: %w", err)
+	}
+
+	// Get all messages from the original session
+	messages, err := qtx.ListMessagesBySession(ctx, sessionID)
+	if err != nil {
+		return Session{}, fmt.Errorf("failed to list messages: %w", err)
+	}
+
+	// Copy each message to the new session with new UUIDs to avoid collisions
+	for _, msg := range messages {
+		_, err := qtx.CreateMessage(ctx, db.CreateMessageParams{
+			ID:               uuid.New().String(), // Always generate new UUID
+			SessionID:        newID,
+			Role:             msg.Role,
+			Parts:            msg.Parts,
+			Model:            msg.Model,
+			Provider:         msg.Provider,
+			IsSummaryMessage: msg.IsSummaryMessage,
+		})
+		if err != nil {
+			return Session{}, fmt.Errorf("failed to copy message %s: %w", msg.ID, err)
+		}
+	}
+
+	// Copy usage stats, summary message ID, and todos from the original
+	todosJSON, err := marshalTodos(original.Todos)
+	if err != nil {
+		return Session{}, fmt.Errorf("failed to marshal todos: %w", err)
+	}
+
+	_, err = qtx.UpdateSession(ctx, db.UpdateSessionParams{
+		ID:               newID,
+		Title:            forkTitle,
+		PromptTokens:     original.PromptTokens,
+		CompletionTokens: original.CompletionTokens,
+		SummaryMessageID: sql.NullString{String: original.SummaryMessageID, Valid: original.SummaryMessageID != ""},
+		Cost:             original.Cost,
+		Todos:            sql.NullString{String: todosJSON, Valid: todosJSON != ""},
+	})
+	if err != nil {
+		return Session{}, fmt.Errorf("failed to update fork stats: %w", err)
+	}
+
+	// Commit the transaction
+	if err := tx.Commit(); err != nil {
+		return Session{}, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	// Build the session object from the database result
+	session := s.fromDBItem(dbSession)
+	session.PromptTokens = original.PromptTokens
+	session.CompletionTokens = original.CompletionTokens
+	session.Cost = original.Cost
+	session.SummaryMessageID = original.SummaryMessageID
+	session.Todos = original.Todos
+
+	// Publish the creation event
+	s.Publish(pubsub.CreatedEvent, session)
+
+	return session, nil
 }
 
 type service struct {
