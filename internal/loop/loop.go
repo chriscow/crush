@@ -163,6 +163,9 @@ func (s *Scheduler) runTask(ctx context.Context, task *Task) {
 		select {
 		case <-ctx.Done():
 			slog.Debug("Loop task cancelled", "task_id", task.ID)
+			// Remove the task from the map on context cancellation to avoid
+			// zombie entries.
+			s.removeTask(task.ID)
 			return
 
 		case <-ticker.C:
