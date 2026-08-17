@@ -1138,7 +1138,23 @@ func (c *coordinator) buildOpenaiProvider(baseURL, apiKey string, headers map[st
 	if baseURL != "" {
 		opts = append(opts, openai.WithBaseURL(baseURL))
 	}
+	if isChatGPTCodexBackend(baseURL) {
+		// The ChatGPT subscription backend rejects max_output_tokens
+		// outright ("Unsupported parameter"), and does so on the key's
+		// presence — sending 0 or null fails the same way. Strip it at
+		// the HTTP layer so every caller is covered, including the
+		// title and summarize agents, which set the field
+		// unconditionally via fantasy.WithMaxOutputTokens.
+		opts = append(opts, openai.WithSDKOptions(openaisdk.WithJSONDel("max_output_tokens")))
+	}
 	return openai.New(opts...)
+}
+
+// isChatGPTCodexBackend reports whether the base URL points at the
+// ChatGPT subscription endpoint used by Codex, which speaks the
+// Responses API but accepts a narrower request body than the public one.
+func isChatGPTCodexBackend(baseURL string) bool {
+	return strings.Contains(baseURL, "chatgpt.com/backend-api/codex")
 }
 
 func (c *coordinator) buildOpenrouterProvider(_, apiKey string, headers map[string]string) (fantasy.Provider, error) {
