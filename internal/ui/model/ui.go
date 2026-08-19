@@ -2040,7 +2040,6 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		m.dialog.CloseDialog(dialog.CommandsID)
 	case dialog.ActionSkillToggle:
 		cmds = append(cmds, m.toggleSkill(msg.SkillName))
-		m.dialog.CloseDialog(dialog.SkillsID)
 
 	case dialog.ActionReloadSkills:
 		cmds = append(cmds, func() tea.Msg {
@@ -5178,6 +5177,10 @@ func (m *UI) toggleSkill(skillName string) tea.Cmd {
 		defer cancel()
 		if err := m.com.Workspace.ReloadSkills(ctx); err != nil {
 			return util.ReportError(err)()
+		}
+
+		if skillsDialog, ok := m.dialog.Dialog(dialog.SkillsID).(*dialog.Skills); ok {
+			skillsDialog.Refresh()
 		}
 
 		return util.NewInfoMsg(fmt.Sprintf("Skill %q %s", skillName, action))
