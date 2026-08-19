@@ -1955,10 +1955,6 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			return forkedSessionInfo{Session: forked}
 		})
 		m.dialog.CloseDialog(dialog.CommandsID)
-	case dialog.ActionLoopList:
-		// TODO: Implement loop list dialog
-		cmds = append(cmds, util.ReportInfo("Loop tasks: feature coming soon"))
-		m.dialog.CloseDialog(dialog.CommandsID)
 	case dialog.ActionToggleHelp:
 		m.status.ToggleHelp()
 		m.dialog.CloseDialog(dialog.CommandsID)
