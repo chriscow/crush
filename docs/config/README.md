@@ -484,6 +484,8 @@ String Keys:
   initialize-as string             context filename created by crush init
   notifications string             notification style: auto, native, osc, bell,
                                    or disabled
+  subagent-model string            default model for delegated agents: large or
+                                   small (default: large)
   attribution-trailer-style string attribution trailer: none, co-authored-by,
                                    or assisted-by
 
@@ -503,6 +505,7 @@ List Keys:
 ```bash
 option progress false
 option skill-path ./skills
+option subagent-model small
 option attribution-trailer-style assisted-by
 ```
 

@@ -84,6 +84,9 @@ func Load(workingDir, dataDir string, debug bool) (*ConfigStore, error) {
 	if err := cfg.ValidateHooks(); err != nil {
 		return nil, fmt.Errorf("invalid hook configuration: %w", err)
 	}
+	if err := cfg.ValidateSubagentModel(); err != nil {
+		return nil, fmt.Errorf("invalid subagent model configuration: %w", err)
+	}
 
 	if !isInsideWorktree() {
 		const depth = 2
@@ -641,6 +644,8 @@ func (c *Config) setDefaults(workingDir, dataDir string) {
 	if str, ok := os.LookupEnv("CRUSH_DISABLE_DEFAULT_PROVIDERS"); ok {
 		c.Options.DisableDefaultProviders, _ = strconv.ParseBool(str)
 	}
+
+	c.Options.SubagentModel = cmp.Or(c.Options.SubagentModel, SelectedModelTypeLarge)
 
 	if c.Options.Attribution == nil {
 		c.Options.Attribution = &Attribution{

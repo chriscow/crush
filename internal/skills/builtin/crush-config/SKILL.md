@@ -109,6 +109,9 @@ model small [<provider>/<id>] [flags]  # set the small slot; no arg prints it
 
 `large` is the primary coding model; `small` is used for summarization.
 
+Use `option subagent-model small` to make Small the default for delegated
+`agent` calls. Calls can still set `model` to `large` or `small` explicitly.
+
 ### mcp
 
 ```bash
@@ -183,7 +186,8 @@ option reset <list-key>    # clear a list option back to empty
 - **Boolean keys phrased positively** (stored as the negated field): `metrics`,
   `auto-summarize`, `provider-auto-update`,
   `default-providers`. Example: `option metrics false` disables metrics.
-- **String keys**: `data-directory`, `initialize-as`, `notifications`.
+- **String keys**: `data-directory`, `initialize-as`, `notifications`,
+  `subagent-model` (`large` or `small`, defaults to `large`).
 - **Attribution keys**: `attribution-trailer-style` (`none`, `co-authored-by`,
   `assisted-by`) and `attribution-generated-with` (boolean).
 - **UI settings**: `option ui compact BOOL`, `option ui diff unified|split`,
@@ -200,6 +204,7 @@ option reset <list-key>    # clear a list option back to empty
 option progress false
 option skill-path ./skills
 option disable-skill crush-config
+option subagent-model small
 option attribution-trailer-style assisted-by
 option attribution-generated-with true
 option ui compact true

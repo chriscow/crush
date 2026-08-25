@@ -652,6 +652,15 @@
             300,
             0
           ]
+        },
+        "subagent_model": {
+          "type": "string",
+          "enum": [
+            "large",
+            "small"
+          ],
+          "description": "Default model type for subagents",
+          "default": "large"
         }
       },
       "additionalProperties": false,

@@ -3,6 +3,7 @@ package config_test
 import (
 	"testing"
 
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/stretchr/testify/require"
 )
 
@@ -24,6 +25,19 @@ option auto-lsp false`)
 func TestShellConfigOptionPositiveMetricsFalse(t *testing.T) {
 	store := loadCrushSh(t, `option metrics false`)
 	require.True(t, store.Config().Options.DisableMetrics, "metrics off => disable_metrics true")
+}
+
+func TestShellConfigOptionSubagentModel(t *testing.T) {
+	store := loadCrushSh(t, `option subagent-model small`)
+	require.Equal(t, config.SelectedModelTypeSmall, store.Config().Options.SubagentModel)
+
+	store.Config().SetupAgents()
+	require.Equal(t, config.SelectedModelTypeSmall, store.Config().Agents[config.AgentTask].Model)
+}
+
+func TestShellConfigOptionRejectsInvalidSubagentModel(t *testing.T) {
+	_, err := loadCrushShErr(t, `option subagent-model medium`)
+	require.ErrorContains(t, err, "subagent model must be large or small")
 }
 
 // The bare positive form defaults to true, which inverts to disable = false.
