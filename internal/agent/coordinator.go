@@ -159,7 +159,10 @@ type coordinator struct {
 	mainAgentName string
 	agents        map[string]SessionAgent
 
-	cronStore *scheduler.Store
+	cronStore      *scheduler.Store
+	cronMu         sync.Mutex
+	skillReloadMu  sync.Mutex
+	scheduledRun   func(context.Context, string, string) error
 
 	// Skills discovery results (session-start snapshot).
 	allSkills    []*skills.Skill // Pre-filter: all discovered after dedup.
@@ -306,22 +309,19 @@ func (c *coordinator) SetMainAgent(agentName string) error {
 // the session's busy queue: it fires between turns, never mid-response,
 // matching Claude Code's scheduler semantics.
 func (c *coordinator) fireScheduledTask(ctx context.Context, task scheduler.Task) error {
+	c.cronMu.Lock()
+	defer c.cronMu.Unlock()
+
 	if _, err := c.sessions.Get(ctx, task.SessionID); err != nil {
-		// The session is gone (deleted or never persisted), so nothing
-		// this task fires can ever land. Drop the whole session's tasks,
-		// durable ones included: leaving them behind means the scheduler
-		// retries a dead session on every fire, forever.
 		c.cronStore.DropSession(task.SessionID)
 		return fmt.Errorf("session %s for scheduled task %s no longer exists", task.SessionID, task.ID)
 	}
 
-	prompt := task.Prompt
-	go func() {
-		if _, err := c.run(ctx, nil, task.SessionID, prompt); err != nil {
-			slog.Error("Scheduled task run failed", "id", task.ID, "session_id", task.SessionID, "error", err)
-		}
-	}()
-	return nil
+	if c.scheduledRun != nil {
+		return c.scheduledRun(ctx, task.SessionID, task.Prompt)
+	}
+	_, err := c.run(ctx, nil, task.SessionID, task.Prompt)
+	return err
 }
 
 // Run implements Coordinator.
@@ -1498,21 +1498,31 @@ func (c *coordinator) updateAgentModels(ctx context.Context, agent SessionAgent,
 	return nil
 }
 
-// ReloadSkills re-discovers skills and updates the coder agent's prompt and
-// tools. Skills are a coder-agent concern, so an active plan agent is left
-// unchanged.
 func (c *coordinator) ReloadSkills(ctx context.Context) error {
+	c.skillReloadMu.Lock()
+	defer c.skillReloadMu.Unlock()
+
 	if c.skillsMgr == nil {
 		return errors.New("skill reload requires a skills manager")
 	}
 
-	allSkills, activeSkills, err := c.skillsMgr.Reload(ctx)
+	cfg := c.cfg.Config()
+	discoveryCfg := skills.DiscoveryConfig{
+		WorkingDir: c.cfg.WorkingDir(),
+	}
+	if cfg.Options != nil {
+		discoveryCfg.SkillsPaths = cfg.Options.SkillsPaths
+		discoveryCfg.DisabledSkills = cfg.Options.DisabledSkills
+	}
+	if resolver := c.cfg.Resolver(); resolver != nil {
+		discoveryCfg.Resolver = resolver.ResolveValue
+	}
+
+	allSkills, activeSkills, err := c.skillsMgr.Reload(ctx, discoveryCfg)
 	if err != nil {
 		return err
 	}
 
-	// Build everything that can fail BEFORE swapping coordinator state,
-	// so a mid-reload error leaves the agent on the old skills.
 	large, _, err := c.buildAgentModels(ctx, config.SelectedModelTypeLarge, false)
 	if err != nil {
 		return err
@@ -1534,14 +1544,14 @@ func (c *coordinator) ReloadSkills(ctx context.Context) error {
 		return errCoderAgentNotConfigured
 	}
 
-	c.allSkills = allSkills
-	c.activeSkills = activeSkills
-	c.skillTracker = skills.NewTracker(activeSkills)
 	tools, err := c.buildTools(ctx, agentCfg, false)
 	if err != nil {
 		return err
 	}
 
+	c.allSkills = allSkills
+	c.activeSkills = activeSkills
+	c.skillTracker = skills.NewTracker(activeSkills)
 	coderAgent := c.agents[config.AgentCoder]
 	coderAgent.SetSystemPrompt(systemPrompt)
 	coderAgent.SetTools(tools)

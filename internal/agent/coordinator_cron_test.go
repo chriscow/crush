@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools"
@@ -106,6 +108,51 @@ func TestCronToolsEndToEnd(t *testing.T) {
 
 // TestFireScheduledTask verifies firing against a deleted session drops
 // the task and reports an error instead of retrying forever.
+func TestFireScheduledTaskWaitsForRun(t *testing.T) {
+	env := testEnv(t)
+
+	sess, err := env.sessions.Create(t.Context(), "cron run")
+	require.NoError(t, err)
+	release := make(chan struct{})
+	started := make(chan struct{})
+	c := &coordinator{
+		sessions:  env.sessions,
+		cronStore: scheduler.NewStore(""),
+		scheduledRun: func(context.Context, string, string) error {
+			close(started)
+			<-release
+			return errors.New("scheduled run failed")
+		},
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		result <- c.fireScheduledTask(t.Context(), scheduler.Task{
+			ID:        "task1234",
+			SessionID: sess.ID,
+			Prompt:    "ping",
+		})
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("scheduled run did not start")
+	}
+	select {
+	case err := <-result:
+		t.Fatalf("fireScheduledTask returned before the run completed: %v", err)
+	default:
+	}
+	close(release)
+	select {
+	case err := <-result:
+		require.ErrorContains(t, err, "scheduled run failed")
+	case <-time.After(time.Second):
+		t.Fatal("fireScheduledTask did not return after the run completed")
+	}
+}
+
 func TestFireScheduledTask(t *testing.T) {
 	env := testEnv(t)
 

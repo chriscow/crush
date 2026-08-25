@@ -277,7 +277,7 @@ func TestManager_Reload(t *testing.T) {
 	))
 
 	// Reload should pick up the new skill.
-	_, activeAfter, err := mgr.Reload(ctx)
+	_, activeAfter, err := mgr.Reload(ctx, cfg)
 	require.NoError(t, err)
 
 	var found bool
@@ -308,9 +308,35 @@ func TestManager_ReloadCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel before calling
 
-	_, _, err := mgr.Reload(ctx)
+	_, _, err := mgr.Reload(ctx, cfg)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "cancelled")
+}
+
+func TestManager_ReloadUsesLatestConfig(t *testing.T) {
+	t.Parallel()
+
+	mgr := NewManager(nil, nil, nil)
+	t.Cleanup(mgr.Shutdown)
+
+	all, active, err := mgr.Reload(t.Context(), DiscoveryConfig{
+		DisabledSkills: []string{"fork"},
+	})
+	require.NoError(t, err)
+	require.Contains(t, skillNames(all), "fork")
+	require.NotContains(t, skillNames(active), "fork")
+
+	_, active, err = mgr.Reload(t.Context(), DiscoveryConfig{})
+	require.NoError(t, err)
+	require.Contains(t, skillNames(active), "fork")
+}
+
+func skillNames(skills []*Skill) []string {
+	names := make([]string, 0, len(skills))
+	for _, skill := range skills {
+		names = append(names, skill.Name)
+	}
+	return names
 }
 
 func TestManager_SkillSnapshot(t *testing.T) {
@@ -348,7 +374,7 @@ func TestManager_SkillSnapshot_AfterReload(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	_, _, err := mgr.Reload(ctx)
+	_, _, err := mgr.Reload(ctx, cfg)
 	require.NoError(t, err)
 
 	// Snapshot after: both slices must reflect the reload atomically.

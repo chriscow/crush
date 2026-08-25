@@ -25,6 +25,7 @@ import (
 // multiple workspaces concurrently and must not enable mirroring.
 type Manager struct {
 	mu           sync.RWMutex
+	reloadMu     sync.Mutex
 	allSkills    []*Skill
 	activeSkills []*Skill
 	states       []*SkillState
@@ -178,27 +179,34 @@ func (m *Manager) SubscribeEvents(ctx context.Context) <-chan pubsub.Event[Event
 	return m.broker.Subscribe(ctx)
 }
 
-// Reload re-runs discovery from scratch using the stored DiscoveryConfig,
-// replacing allSkills, activeSkills, states, and resolvedPaths. It also
-// publishes a discovery event so subscribers (TUI sidebar, etc.) update.
-// Returns the new active skills so callers (e.g. the coordinator) can
-// propagate them to the system prompt and tools. The context is checked
-// for cancellation after discovery completes but before swapping state.
-func (m *Manager) Reload(ctx context.Context) (all, active []*Skill, err error) {
-	allSkills, activeSkills, states := DiscoverFromConfig(m.discoveryCfg)
-	resolved := m.discoveryCfg.ResolvePaths()
+// Reload re-runs discovery from scratch using cfg, replacing allSkills,
+// activeSkills, states, and resolvedPaths. Reloads are serialized so an
+// earlier slow discovery cannot overwrite a newer result.
+func (m *Manager) Reload(ctx context.Context, cfg DiscoveryConfig) (all, active []*Skill, err error) {
+	m.reloadMu.Lock()
+	defer m.reloadMu.Unlock()
 
+	allSkills, activeSkills, states := DiscoverFromConfig(cfg)
+	resolved := cfg.ResolvePaths()
 	if err := ctx.Err(); err != nil {
 		return nil, nil, fmt.Errorf("skill reload cancelled: %w", err)
 	}
 
 	m.mu.Lock()
+	m.discoveryCfg = cfg
 	m.allSkills = allSkills
 	m.activeSkills = activeSkills
+	m.states = cloneStates(states)
 	m.resolvedPaths = resolved
 	m.mu.Unlock()
 
-	m.PublishStates(states)
+	if m.globalMirror {
+		SetLatestStates(states)
+	}
+	m.broker.Publish(pubsub.UpdatedEvent, Event{States: cloneStates(states)})
+	if m.globalMirror {
+		PublishStates(states)
+	}
 	return allSkills, activeSkills, nil
 }
 
