@@ -64,6 +64,14 @@ WHERE parent_session_id IS NULL
 GROUP BY date(created_at, 'unixepoch')
 ORDER BY day ASC;
 
+-- name: GetProjectionStats :one
+SELECT
+    COUNT(*) as projected_batches,
+    COALESCE(SUM(raw_chars), 0) as raw_chars,
+    COALESCE(SUM(projected_chars), 0) as projected_chars
+FROM context_projection_nodes
+WHERE state = 'active';
+
 -- name: GetAverageResponseTime :one
 SELECT
     CAST(COALESCE(AVG(finished_at - created_at), 0) AS INTEGER) as avg_response_seconds

@@ -1,17 +1,25 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
 	"charm.land/fantasy/providers/anthropic"
 	"charm.land/fantasy/providers/bedrock"
 	"charm.land/fantasy/providers/openaicompat"
+	"github.com/charmbracelet/crush/internal/agent/prompt"
+	"github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/condense"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/discover"
 	"github.com/stretchr/testify/assert"
@@ -61,6 +69,241 @@ func newTestCoordinator(t *testing.T, env fakeEnv, providerID string, providerCf
 		sessions: env.sessions,
 		messages: env.messages,
 	}
+}
+
+func TestProviderBuildOptionsKeepOrdinaryDebugBodiesAndQuietCondense(t *testing.T) {
+	var responseMarker string
+	var requestBodies []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		requestBodies = append(requestBodies, string(body))
+		w.Header().Set("Content-Type", "application/json")
+		_, err = fmt.Fprintf(w, `{"id":"response","object":"chat.completion","created":1,"model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":%q},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`, responseMarker)
+		require.NoError(t, err)
+	}))
+	defer server.Close()
+
+	env := testEnv(t)
+	coord := newTestCoordinator(t, env, "test-provider", config.ProviderConfig{})
+	coord.cfg.Config().Options.Debug = true
+	providerCfg := config.ProviderConfig{
+		ID: "test-provider", Type: openaicompat.Name, BaseURL: server.URL, APIKey: "test-key",
+	}
+	modelCfg := config.SelectedModel{Provider: providerCfg.ID, Model: "test-model"}
+
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	buildModel := func(allowBodyLogging bool) fantasy.LanguageModel {
+		provider, err := coord.buildProvider(providerCfg, modelCfg, providerBuildOptions{allowBodyLogging: allowBodyLogging})
+		require.NoError(t, err)
+		model, err := provider.LanguageModel(t.Context(), modelCfg.Model)
+		require.NoError(t, err)
+		return model
+	}
+	generate := func(model fantasy.LanguageModel, requestMarker, returnedMarker string) {
+		responseMarker = returnedMarker
+		_, err := model.Generate(t.Context(), fantasy.Call{Prompt: []fantasy.Message{fantasy.NewUserMessage(requestMarker)}})
+		require.NoError(t, err)
+	}
+
+	ordinary := buildModel(true)
+	generate(ordinary, "ordinary-request-secret", "ordinary-response-secret")
+	require.Contains(t, logs.String(), "ordinary-request-secret")
+	require.Contains(t, logs.String(), "ordinary-response-secret")
+
+	beforeQuiet := logs.Len()
+	quiet := buildModel(false)
+	generate(quiet, "condense-request-secret", "condense-response-secret")
+	quietLogs := logs.String()[beforeQuiet:]
+	require.NotContains(t, quietLogs, "condense-request-secret")
+	require.NotContains(t, quietLogs, "condense-response-secret")
+	require.Contains(t, requestBodies[len(requestBodies)-1], "condense-request-secret")
+
+	beforeOrdinaryAgain := logs.Len()
+	generate(ordinary, "ordinary-again-secret", "ordinary-again-response")
+	require.Contains(t, logs.String()[beforeOrdinaryAgain:], "ordinary-again-secret")
+}
+
+func TestAppendContextRecoveryToolRejectsFinalNameCollision(t *testing.T) {
+	ordinary := []fantasy.AgentTool{
+		&fakeTool{name: "zeta"},
+		&fakeTool{name: tools.ContextTreeQueryToolName},
+	}
+	_, err := appendContextRecoveryTool(ordinary, &fakeTool{name: tools.ContextTreeQueryToolName}, "coder")
+	require.ErrorContains(t, err, `"context_tree_query" is reserved`)
+}
+
+func TestBuildToolsRegistersRecoveryOnlyForTopLevelAndSortsFinalNames(t *testing.T) {
+	env := testEnv(t)
+	coord, agentCfg := newCronTestCoordinator(t, env)
+	coord.contextModule = condense.New(nil, nil, condense.Options{})
+
+	topLevel, err := coord.buildTools(t.Context(), agentCfg, false)
+	require.NoError(t, err)
+	require.Len(t, topLevel, 4)
+	names := make([]string, len(topLevel))
+	for i, tool := range topLevel {
+		names[i] = tool.Info().Name
+	}
+	require.Equal(t, []string{
+		tools.CronCreateToolName,
+		tools.CronDeleteToolName,
+		tools.CronListToolName,
+		tools.ContextTreeQueryToolName,
+	}, names)
+	_, isInfrastructureWrapper := topLevel[len(topLevel)-1].(*recoveryAuditTool)
+	require.True(t, isInfrastructureWrapper)
+
+	subagent, err := coord.buildTools(t.Context(), agentCfg, true)
+	require.NoError(t, err)
+	for _, tool := range subagent {
+		require.NotEqual(t, tools.ContextTreeQueryToolName, tool.Info().Name)
+	}
+}
+
+func TestBuildAgentSharesModuleWithTopLevelRecoveryOnly(t *testing.T) {
+	coord := newGateTestCoordinator(t, false)
+	coord.projectionStore = condense.NewStore(nil, nil)
+	coord.contextModule = nil
+	coord.contextSummarizer = nil
+
+	projectionCfg := coord.cfg.Config().Options.ContextProjection
+	projectionCfg.Enabled = true
+	projectionCfg.SummarizerModel = config.SelectedModelTypeSmall
+	projectionCfg.SummarizerTimeout = time.Second
+	p, err := coderPrompt(prompt.WithWorkingDir(coord.cfg.WorkingDir()))
+	require.NoError(t, err)
+	agentCfg := coord.cfg.Config().Agents[config.AgentCoder]
+
+	topLevel, err := coord.buildAgent(t.Context(), p, agentCfg, false)
+	require.NoError(t, err)
+	require.Same(t, coord.contextModule, topLevel.(*sessionAgent).projector)
+	topTools, err := coord.buildTools(t.Context(), agentCfg, false)
+	require.NoError(t, err)
+	var recovery *recoveryAuditTool
+	for _, tool := range topTools {
+		if tool.Info().Name == tools.ContextTreeQueryToolName {
+			recovery, _ = tool.(*recoveryAuditTool)
+		}
+	}
+	require.NotNil(t, recovery)
+	queryTool := recovery.inner
+	require.Equal(t, tools.ContextTreeQueryToolName, queryTool.Info().Name)
+
+	subagent, err := coord.buildAgent(t.Context(), p, agentCfg, true)
+	require.NoError(t, err)
+	require.Nil(t, subagent.(*sessionAgent).projector)
+	require.Same(t, coord.contextModule, topLevel.(*sessionAgent).projector)
+	require.NotEqual(
+		t,
+		topLevel.(*sessionAgent).smallModel.Get().Model,
+		coord.contextSummarizer.selected.Get().model.Model,
+		"condensation must own a separately constructed provider model",
+	)
+}
+
+func TestBuildAgentDisabledProjectionUsesQueryOnlyModule(t *testing.T) {
+	coord := newGateTestCoordinator(t, false)
+	coord.projectionStore = condense.NewStore(nil, nil)
+	projection := coord.cfg.Config().Options.ContextProjection
+	projection.Enabled = false
+
+	p, err := coderPrompt(prompt.WithWorkingDir(coord.cfg.WorkingDir()))
+	require.NoError(t, err)
+	agentCfg := coord.cfg.Config().Agents[config.AgentCoder]
+	topLevel, err := coord.buildAgent(t.Context(), p, agentCfg, false)
+	require.NoError(t, err)
+	require.NotNil(t, coord.contextModule)
+	require.Nil(t, coord.contextSummarizer)
+	require.Same(t, coord.contextModule, topLevel.(*sessionAgent).projector)
+
+	projection.Enabled = true
+	projection.SummarizerModel = config.SelectedModelTypeSmall
+	projection.SummarizerTimeout = time.Second
+	coord.currentAgent = topLevel
+	require.NoError(t, coord.UpdateModels(t.Context()))
+	require.NotNil(t, coord.contextSummarizer)
+	require.True(t, coord.contextModule.Options().Enabled)
+}
+
+func TestContextProjectionIdentityIncludesEffectiveModelOptions(t *testing.T) {
+	coord := newGateTestCoordinator(t, false)
+	projection := *coord.cfg.Config().Options.ContextProjection
+	projection.Enabled = true
+	selected, err := coord.buildCondenseModel(t.Context(), config.SelectedModelTypeSmall)
+	require.NoError(t, err)
+	providerCfg, ok := coord.cfg.Config().Providers.Get(selected.ModelCfg.Provider)
+	require.True(t, ok)
+
+	first, err := coord.contextProjectionOptions(projection, selected, providerCfg)
+	require.NoError(t, err)
+	selected.CatwalkCfg.Options.ProviderOptions = map[string]any{"temperature": 0.25}
+	second, err := coord.contextProjectionOptions(projection, selected, providerCfg)
+	require.NoError(t, err)
+	require.NotEqual(t, first.ConfigurationID, second.ConfigurationID)
+}
+
+func TestContextProjectionIdentityChangesWithProviderCredentials(t *testing.T) {
+	coord := newGateTestCoordinator(t, false)
+	projection := *coord.cfg.Config().Options.ContextProjection
+	projection.Enabled = true
+	selected, err := coord.buildCondenseModel(t.Context(), config.SelectedModelTypeSmall)
+	require.NoError(t, err)
+	providerCfg, ok := coord.cfg.Config().Providers.Get(selected.ModelCfg.Provider)
+	require.True(t, ok)
+
+	baseline, err := coord.contextProjectionOptions(projection, selected, providerCfg)
+	require.NoError(t, err)
+
+	rekeyed := providerCfg
+	rekeyed.APIKey = "different-key"
+	rotated, err := coord.contextProjectionOptions(projection, selected, rekeyed)
+	require.NoError(t, err)
+
+	require.NotEqual(t, baseline.ConfigurationID, rotated.ConfigurationID,
+		"the summarizer identity intentionally rotates with provider credentials so durable suppression never spans credentials")
+}
+
+func TestUpdateModelsRefreshesContextProjectionConfiguration(t *testing.T) {
+	coord := newGateTestCoordinator(t, false)
+	coord.projectionStore = condense.NewStore(nil, nil)
+	projection := coord.cfg.Config().Options.ContextProjection
+	projection.Enabled = true
+	projection.SummarizerModel = config.SelectedModelTypeSmall
+	projection.SummarizerTimeout = time.Second
+	minimum := 10
+	recent := 1
+	projection.MinBatchChars = &minimum
+	projection.KeepRecentBatches = &recent
+
+	p, err := coderPrompt(prompt.WithWorkingDir(coord.cfg.WorkingDir()))
+	require.NoError(t, err)
+	agentCfg := coord.cfg.Config().Agents[config.AgentCoder]
+	_, err = coord.buildAgent(t.Context(), p, agentCfg, false)
+	require.NoError(t, err)
+	before := coord.contextModule.Options()
+
+	projection.Enabled = false
+	projection.SummarizerModel = config.SelectedModelTypeLarge
+	projection.SummarizerTimeout = 3 * time.Second
+	minimum = 20
+	recent = 2
+	projection.MinBatchChars = &minimum
+	projection.KeepRecentBatches = &recent
+	require.NoError(t, coord.UpdateModels(t.Context()))
+
+	after := coord.contextModule.Options()
+	require.False(t, after.Enabled)
+	require.Equal(t, 20, after.MinBatchChars)
+	require.Equal(t, 2, after.KeepRecentBatches)
+	require.Equal(t, 3*time.Second, after.SummarizerTimeout)
+	require.NotEqual(t, before.ConfigurationID, after.ConfigurationID)
+	require.Nil(t, coord.contextSummarizer)
+	require.Equal(t, config.SelectedModelTypeLarge, projection.SummarizerModel)
 }
 
 func TestCoordinator_ReloadSkills_NilManager(t *testing.T) {

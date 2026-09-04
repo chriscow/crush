@@ -24,6 +24,9 @@ func TestCloneForWrite_Isolation(t *testing.T) {
 		Providers: csync.NewMap[string, ProviderConfig](),
 		Options: &Options{
 			TUI: &TUIOptions{CompactMode: false},
+			ContextProjection: &ContextProjectionOptions{
+				MinBatchChars: func() *int { value := 1_000; return &value }(),
+			},
 		},
 	}
 
@@ -38,6 +41,7 @@ func TestCloneForWrite_Isolation(t *testing.T) {
 	clone.Options.TUI.Transparent = &enabled
 	disabled := false
 	clone.Options.TUI.Mouse = &disabled
+	*clone.Options.ContextProjection.MinBatchChars = 0
 
 	// The original must be untouched.
 	require.Equal(t, "openai", orig.Models[SelectedModelTypeLarge].Provider, "Models leaked")
@@ -46,4 +50,5 @@ func TestCloneForWrite_Isolation(t *testing.T) {
 	require.False(t, orig.Options.TUI.CompactMode, "Options.TUI.CompactMode leaked")
 	require.Nil(t, orig.Options.TUI.Transparent, "Options.TUI.Transparent leaked")
 	require.Nil(t, orig.Options.TUI.Mouse, "Options.TUI.Mouse leaked")
+	require.Equal(t, 1_000, *orig.Options.ContextProjection.MinBatchChars, "Options.ContextProjection.MinBatchChars leaked")
 }

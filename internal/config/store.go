@@ -1333,6 +1333,9 @@ func (s *ConfigStore) reloadFromDiskLocked(ctx context.Context) error {
 	if err := cfg.ValidateSubagentModel(); err != nil {
 		return fmt.Errorf("invalid subagent model configuration on reload: %w", err)
 	}
+	if err := cfg.ValidateContextProjection(); err != nil {
+		return fmt.Errorf("invalid context projection configuration on reload: %w", err)
+	}
 
 	// Save current state for potential rollback BEFORE configureProviders,
 	// which may write to disk via RemoveConfigField (e.g. removing stale
@@ -1386,7 +1389,11 @@ func (s *ConfigStore) reloadFromDiskLocked(ctx context.Context) error {
 	// Mirror startup flow: setup models and agents against NEW config.
 	var setupErr error
 	if !cfg.IsConfigured() {
-		slog.Warn("No providers configured after reload")
+		if modelErr := cfg.ValidateContextProjectionModel(); modelErr != nil {
+			setupErr = fmt.Errorf("invalid context projection configuration on reload: %w", modelErr)
+		} else {
+			slog.Warn("No providers configured after reload")
+		}
 	} else {
 		resolved, resolveErr := resolveSelectedModels(cfg, providers)
 		if resolveErr != nil {
@@ -1394,7 +1401,11 @@ func (s *ConfigStore) reloadFromDiskLocked(ctx context.Context) error {
 		} else {
 			cfg.Models[SelectedModelTypeLarge] = resolved.Large
 			cfg.Models[SelectedModelTypeSmall] = resolved.Small
-			s.SetupAgents()
+			if modelErr := cfg.ValidateContextProjectionModel(); modelErr != nil {
+				setupErr = fmt.Errorf("invalid context projection configuration on reload: %w", modelErr)
+			} else {
+				s.SetupAgents()
+			}
 		}
 	}
 

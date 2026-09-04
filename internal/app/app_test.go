@@ -2,15 +2,120 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/crush/internal/condense"
+	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/csync"
+	"github.com/charmbracelet/crush/internal/db"
+	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/stretchr/testify/require"
 )
+
+// TestNewWiresContextProjectionDeletionLifecycle verifies that projection rows
+// are invalidated through the application's message and session lifecycles.
+func TestNewWiresContextProjectionDeletionLifecycle(t *testing.T) {
+	dataDir := t.TempDir()
+	conn, err := db.Connect(t.Context(), dataDir)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, db.Release(dataDir))
+		db.ResetPool()
+	})
+
+	cfg := &config.Config{
+		Options:   &config.Options{DataDirectory: dataDir},
+		Providers: csync.NewMap[string, config.ProviderConfig](),
+	}
+	store := config.NewTestStore(cfg)
+	app, err := New(t.Context(), conn, store, nil)
+	require.NoError(t, err)
+
+	sess, err := app.Sessions.Create(t.Context(), "projection lifecycle")
+	require.NoError(t, err)
+	assistant, err := app.Messages.Create(t.Context(), sess.ID, message.CreateMessageParams{
+		Role: message.Assistant,
+		Parts: []message.ContentPart{message.ToolCall{
+			ID: "call-1", Name: "view", Input: `{}`, Finished: true,
+		}},
+	})
+	require.NoError(t, err)
+	assistant.AddFinish(message.FinishReasonToolUse, "", "")
+	require.NoError(t, app.Messages.Update(t.Context(), assistant))
+	toolMessage, err := app.Messages.Create(t.Context(), sess.ID, message.CreateMessageParams{
+		Role: message.Tool,
+		Parts: []message.ContentPart{message.ToolResult{
+			ToolCallID: "call-1", Name: "view", Content: strings.Repeat("canonical", 100),
+		}},
+	})
+	require.NoError(t, err)
+
+	require.NotNil(t, app.projectionStore)
+	projection := condense.New(app.projectionStore, appTestSummarizer{}, condense.Options{
+		Enabled: true, SummarizerTimeout: time.Second,
+	})
+	_, err = projection.Project(t.Context(), sess.ID, []message.Message{assistant, toolMessage})
+	require.NoError(t, err)
+
+	queries := db.New(conn)
+	require.NoError(t, app.Messages.Delete(t.Context(), toolMessage.ID))
+	_, err = app.Messages.Get(t.Context(), toolMessage.ID)
+	require.ErrorIs(t, err, sql.ErrNoRows)
+	items, err := queries.CountContextProjectionItemsBySession(t.Context(), sess.ID)
+	require.NoError(t, err)
+	require.Zero(t, items)
+
+	secondAssistant, err := app.Messages.Create(t.Context(), sess.ID, message.CreateMessageParams{
+		Role: message.Assistant,
+		Parts: []message.ContentPart{message.ToolCall{
+			ID: "call-2", Name: "view", Input: `{}`, Finished: true,
+		}},
+	})
+	require.NoError(t, err)
+	secondAssistant.AddFinish(message.FinishReasonToolUse, "", "")
+	require.NoError(t, app.Messages.Update(t.Context(), secondAssistant))
+	_, err = app.Messages.Create(t.Context(), sess.ID, message.CreateMessageParams{
+		Role: message.Tool,
+		Parts: []message.ContentPart{message.ToolResult{
+			ToolCallID: "call-2", Name: "view", Content: strings.Repeat("second", 150),
+		}},
+	})
+	require.NoError(t, err)
+	currentMessages, err := app.Messages.List(t.Context(), sess.ID)
+	require.NoError(t, err)
+	_, err = projection.Project(t.Context(), sess.ID, currentMessages)
+	require.NoError(t, err)
+
+	require.NoError(t, app.Messages.PrepareSessionDelete(t.Context(), sess.ID))
+	require.NoError(t, app.Sessions.Delete(t.Context(), sess.ID))
+	app.Messages.FinishSessionDelete(sess.ID, true)
+	for _, count := range []func(context.Context, string) (int64, error){
+		queries.CountContextProjectionNodesBySession,
+		queries.CountContextProjectionSourcesBySession,
+		queries.CountContextProjectionItemsBySession,
+	} {
+		value, err := count(t.Context(), sess.ID)
+		require.NoError(t, err)
+		require.Zero(t, value)
+	}
+}
+
+type appTestSummarizer struct{}
+
+func (appTestSummarizer) Summarize(_ context.Context, candidate condense.Candidate) (condense.Summary, error) {
+	items := make([]condense.SummaryItem, len(candidate.Items))
+	for i := range items {
+		items[i] = condense.SummaryItem{Ordinal: i, Description: "description"}
+	}
+	return condense.Summary{Text: "summary", Items: items}, nil
+}
 
 // TestSetupSubscriber_NormalFlow verifies that events published to the source
 // broker are forwarded to the output broker.

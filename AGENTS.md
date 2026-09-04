@@ -11,6 +11,9 @@ agent skills.
 
 The module path is `github.com/charmbracelet/crush`.
 
+When rebasing, resolving conflicts, or changing integrated upstream work, read
+`.git/info/upstream-pr-integrations.md` first.
+
 ## Architecture
 
 ```

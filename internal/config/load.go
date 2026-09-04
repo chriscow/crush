@@ -87,6 +87,9 @@ func Load(workingDir, dataDir string, debug bool) (*ConfigStore, error) {
 	if err := cfg.ValidateSubagentModel(); err != nil {
 		return nil, fmt.Errorf("invalid subagent model configuration: %w", err)
 	}
+	if err := cfg.ValidateContextProjection(); err != nil {
+		return nil, fmt.Errorf("invalid context projection configuration: %w", err)
+	}
 
 	if !isInsideWorktree() {
 		const depth = 2
@@ -153,6 +156,9 @@ func Load(workingDir, dataDir string, debug bool) (*ConfigStore, error) {
 	}
 
 	if !cfg.IsConfigured() {
+		if err := cfg.ValidateContextProjectionModel(); err != nil {
+			return nil, fmt.Errorf("invalid context projection configuration: %w", err)
+		}
 		slog.Warn("No providers configured")
 		return store, nil
 	}
@@ -163,6 +169,9 @@ func Load(workingDir, dataDir string, debug bool) (*ConfigStore, error) {
 	}
 	cfg.Models[SelectedModelTypeLarge] = resolved.Large
 	cfg.Models[SelectedModelTypeSmall] = resolved.Small
+	if err := cfg.ValidateContextProjectionModel(); err != nil {
+		return nil, fmt.Errorf("invalid context projection configuration: %w", err)
+	}
 
 	// Persist any fallback corrections while we still hold writeMu.
 	if resolved.LargeFallback {
@@ -570,6 +579,15 @@ func (c *Config) NormalizeOptions() {
 	}
 	if c.Options.TUI.ExitBanner == "" {
 		c.Options.TUI.ExitBanner = ExitBannerDefault
+	}
+	if c.Options.ContextProjection == nil {
+		c.Options.ContextProjection = &ContextProjectionOptions{}
+	}
+	assignIfNil(&c.Options.ContextProjection.MinBatchChars, defaultContextProjectionMinBatchChars)
+	assignIfNil(&c.Options.ContextProjection.KeepRecentBatches, defaultContextProjectionKeepRecentBatches)
+	c.Options.ContextProjection.SummarizerModel = cmp.Or(c.Options.ContextProjection.SummarizerModel, SelectedModelTypeSmall)
+	if c.Options.ContextProjection.SummarizerTimeout == 0 {
+		c.Options.ContextProjection.SummarizerTimeout = defaultContextProjectionSummarizerTimeout
 	}
 }
 

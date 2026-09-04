@@ -2,6 +2,7 @@ package config_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/stretchr/testify/require"
@@ -44,6 +45,46 @@ func TestShellConfigOptionRejectsInvalidSubagentModel(t *testing.T) {
 func TestShellConfigOptionPositiveMetricsBare(t *testing.T) {
 	store := loadCrushSh(t, `option metrics`)
 	require.False(t, store.Config().Options.DisableMetrics, "metrics on => disable_metrics false")
+}
+
+func TestShellConfigOptionContextProjection(t *testing.T) {
+	store := loadCrushSh(t, `provider add test --type openai-compat --base-url http://localhost:8080 --api-key test-key
+model add test/test-model --name "Test Model"
+model large test/test-model
+option context-projection enabled true
+option context-projection min-batch-chars 0
+option context-projection keep-recent-batches 0
+option context-projection summarizer-model large
+option context-projection summarizer-timeout 90s`)
+
+	opts := store.Config().Options.ContextProjection
+	require.NotNil(t, opts)
+	require.True(t, opts.Enabled)
+	require.Equal(t, 0, opts.GetMinBatchChars())
+	require.Equal(t, 0, opts.GetKeepRecentBatches())
+	require.Equal(t, config.SelectedModelTypeLarge, opts.SummarizerModel)
+	require.Equal(t, 90*time.Second, opts.SummarizerTimeout)
+}
+
+func TestShellConfigOptionContextProjectionRejectsInvalidValue(t *testing.T) {
+	tests := []struct {
+		name    string
+		script  string
+		wantErr string
+	}{
+		{name: "boolean", script: `option context-projection enabled maybe`, wantErr: "enabled expects true/false"},
+		{name: "minimum batch characters", script: `option context-projection min-batch-chars -1`, wantErr: "min-batch-chars expects a non-negative integer"},
+		{name: "recent batches", script: `option context-projection keep-recent-batches -1`, wantErr: "keep-recent-batches expects a non-negative integer"},
+		{name: "model", script: `option context-projection summarizer-model medium`, wantErr: "summarizer-model expects large or small"},
+		{name: "timeout", script: `option context-projection summarizer-timeout 0s`, wantErr: "summarizer-timeout expects a duration"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := loadCrushShErr(t, tt.script)
+			require.ErrorContains(t, err, tt.wantErr)
+		})
+	}
 }
 
 func TestShellConfigOptionUI(t *testing.T) {

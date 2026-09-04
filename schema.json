@@ -111,6 +111,48 @@
       "additionalProperties": false,
       "type": "object"
     },
+    "ContextProjectionOptions": {
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable recoverable projection of historical tool results",
+          "default": false
+        },
+        "min_batch_chars": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Minimum tool-result characters required before projection",
+          "default": 1000
+        },
+        "keep_recent_batches": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of newest completed tool batches to keep verbatim",
+          "default": 3
+        },
+        "summarizer_model": {
+          "type": "string",
+          "enum": [
+            "large",
+            "small"
+          ],
+          "description": "Configured model type used to summarize projected context",
+          "default": "small"
+        },
+        "summarizer_timeout": {
+          "type": "integer",
+          "maximum": 3600000000000,
+          "minimum": 1,
+          "description": "Maximum time allowed for context projection summarization",
+          "default": 120000000000,
+          "examples": [
+            120000000000
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
     "HookConfig": {
       "properties": {
         "name": {
@@ -546,6 +588,10 @@
         "tui": {
           "$ref": "#/$defs/TUIOptions",
           "description": "Terminal user interface options"
+        },
+        "context_projection": {
+          "$ref": "#/$defs/ContextProjectionOptions",
+          "description": "Recoverable projection options for historical tool results"
         },
         "debug": {
           "type": "boolean",

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -216,6 +217,59 @@ func TestOption_InvertedBool(t *testing.T) {
 
 	opts := result["options"].(map[string]any)
 	require.Equal(t, true, opts["disable_metrics"])
+}
+
+func TestOption_ContextProjection(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "crushrc")
+	script := `option context-projection enabled true
+option context-projection min-batch-chars 0
+option context-projection keep-recent-batches 0
+option context-projection summarizer-model large
+option context-projection summarizer-timeout 90s`
+
+	jsonBytes, err := LoadShellConfig(t.Context(), path, []byte(script))
+	require.NoError(t, err)
+
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(jsonBytes, &result))
+
+	opts := result["options"].(map[string]any)
+	projection := opts["context_projection"].(map[string]any)
+	require.Equal(t, true, projection["enabled"])
+	require.Equal(t, float64(0), projection["min_batch_chars"])
+	require.Equal(t, float64(0), projection["keep_recent_batches"])
+	require.Equal(t, "large", projection["summarizer_model"])
+	require.Equal(t, float64(90*time.Second), projection["summarizer_timeout"])
+}
+
+func TestOption_ContextProjectionRejectsInvalidValues(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		script  string
+		wantErr string
+	}{
+		{name: "boolean", script: `option context-projection enabled sometimes`, wantErr: "enabled expects true/false"},
+		{name: "minimum batch characters", script: `option context-projection min-batch-chars -1`, wantErr: "min-batch-chars expects a non-negative integer"},
+		{name: "recent batches", script: `option context-projection keep-recent-batches nope`, wantErr: "keep-recent-batches expects a non-negative integer"},
+		{name: "model", script: `option context-projection summarizer-model medium`, wantErr: "summarizer-model expects large or small"},
+		{name: "timeout syntax", script: `option context-projection summarizer-timeout soon`, wantErr: "summarizer-timeout expects a duration"},
+		{name: "timeout zero", script: `option context-projection summarizer-timeout 0s`, wantErr: "summarizer-timeout expects a duration"},
+		{name: "timeout bound", script: `option context-projection summarizer-timeout 2h`, wantErr: "summarizer-timeout expects a duration"},
+		{name: "unknown key", script: `option context-projection bogus value`, wantErr: "unknown key"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "crushrc")
+			_, err := LoadShellConfig(t.Context(), path, []byte(tt.script))
+			require.ErrorContains(t, err, tt.wantErr)
+		})
+	}
 }
 
 func TestOption_UnknownKey(t *testing.T) {

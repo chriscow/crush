@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // handleOption implements the `option` builtin.
@@ -49,6 +50,9 @@ func handleOption(ctx context.Context, args []string, stdin io.Reader, stdout, s
 
 	if key == "ui" {
 		return optionUI(o, args, stderr)
+	}
+	if key == "context-projection" {
+		return optionContextProjection(o, args, stderr)
 	}
 
 	// "option reset <key>" wipes a list back to empty. Because the builder
@@ -273,6 +277,51 @@ func optionUI(options map[string]any, args []string, stderr io.Writer) error {
 	}
 
 	slog.Info("UI option set in shell config", "key", key, "value", value)
+	return nil
+}
+
+func optionContextProjection(options map[string]any, args []string, stderr io.Writer) error {
+	if len(args) != 4 {
+		return usage(stderr, "usage: option context-projection <enabled|min-batch-chars|keep-recent-batches|summarizer-model|summarizer-timeout> <value>")
+	}
+
+	key := args[2]
+	value := args[3]
+	projection := childMap(options, "context_projection")
+
+	switch key {
+	case "enabled":
+		parsed, err := parseBool(value)
+		if err != nil {
+			return usage(stderr, fmt.Sprintf("option context-projection enabled expects true/false, got %q", value))
+		}
+		projection["enabled"] = parsed
+	case "min-batch-chars", "keep-recent-batches":
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 0 {
+			return usage(stderr, fmt.Sprintf("option context-projection %s expects a non-negative integer, got %q", key, value))
+		}
+		jsonKey := "min_batch_chars"
+		if key == "keep-recent-batches" {
+			jsonKey = "keep_recent_batches"
+		}
+		projection[jsonKey] = parsed
+	case "summarizer-model":
+		if value != "large" && value != "small" {
+			return usage(stderr, fmt.Sprintf("option context-projection summarizer-model expects large or small, got %q", value))
+		}
+		projection["summarizer_model"] = value
+	case "summarizer-timeout":
+		parsed, err := time.ParseDuration(value)
+		if err != nil || parsed <= 0 || parsed > time.Hour {
+			return usage(stderr, fmt.Sprintf("option context-projection summarizer-timeout expects a duration greater than zero and no more than 1h, got %q", value))
+		}
+		projection["summarizer_timeout"] = parsed
+	default:
+		return usage(stderr, fmt.Sprintf("option context-projection: unknown key %q", key))
+	}
+
+	slog.Info("Context projection option set in shell config", "key", key, "value", value)
 	return nil
 }
 

@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/proto"
@@ -108,7 +109,16 @@ func (b *Backend) DeleteSession(ctx context.Context, workspaceID, sessionID stri
 		return err
 	}
 
-	return ws.Sessions.Delete(ctx, sessionID)
+	if err := ws.Messages.PrepareSessionDelete(ctx, sessionID); err != nil {
+		return fmt.Errorf("prepare message deletion: %w", err)
+	}
+	deleted := false
+	defer func() { ws.Messages.FinishSessionDelete(sessionID, deleted) }()
+	if err := ws.Sessions.Delete(ctx, sessionID); err != nil {
+		return err
+	}
+	deleted = true
+	return nil
 }
 
 // ForkSession creates a fork of a session.
@@ -117,9 +127,10 @@ func (b *Backend) ForkSession(ctx context.Context, workspaceID, sessionID string
 	if err != nil {
 		return session.Session{}, err
 	}
-	if err := ws.Messages.FlushAll(ctx); err != nil {
+	if err := ws.Messages.PrepareSessionSnapshot(ctx, sessionID); err != nil {
 		return session.Session{}, err
 	}
+	defer ws.Messages.FinishSessionSnapshot(sessionID)
 
 	return ws.Sessions.Fork(ctx, sessionID)
 }

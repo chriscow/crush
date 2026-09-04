@@ -38,6 +38,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
+	"github.com/charmbracelet/crush/internal/condense"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/message"
@@ -165,6 +166,11 @@ func filterToolsForChannel(agentTools []fantasy.AgentTool, channel string, state
 	return filtered
 }
 
+type contextProjector interface {
+	Project(ctx context.Context, sessionID string, messages []message.Message) ([]message.Message, error)
+	AccountUsage(ctx context.Context, sessionID string) error
+}
+
 type SessionAgent interface {
 	Run(context.Context, SessionAgentCall) (*fantasy.AgentResult, error)
 	BeginAccepted(sessionID string) *AcceptedRun
@@ -212,7 +218,8 @@ type sessionAgent struct {
 	// cfg backs channel reply routing (config lookup + MCP tool
 	// invocation). Nil in tests and sub-agents that never see channel
 	// turns; sendChannelReply treats nil as "routing disabled".
-	cfg                  *config.ConfigStore
+	cfg       *config.ConfigStore
+	projector contextProjector
 	disableAutoSummarize bool
 	isYolo               bool
 	notify               pubsub.Publisher[notify.Notification]
@@ -269,7 +276,8 @@ type SessionAgentOptions struct {
 	IsYolo               bool
 	Sessions             session.Service
 	Messages             message.Service
-	Cfg                  *config.ConfigStore
+	Cfg       *config.ConfigStore
+	Projector contextProjector
 	Tools                []fantasy.AgentTool
 	Notify               pubsub.Publisher[notify.Notification]
 	RunComplete          pubsub.Publisher[notify.RunComplete]
@@ -286,7 +294,8 @@ func NewSessionAgent(
 		isSubAgent:           opts.IsSubAgent,
 		sessions:             opts.Sessions,
 		messages:             opts.Messages,
-		cfg:                  opts.Cfg,
+		cfg:       opts.Cfg,
+		projector: opts.Projector,
 		disableAutoSummarize: opts.DisableAutoSummarize,
 		tools:                csync.NewSliceFrom(opts.Tools),
 		isYolo:               opts.IsYolo,
@@ -738,22 +747,70 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		return nil, fmt.Errorf("failed to get session: %w", err)
 	}
 
-	msgs, err := a.getSessionMessages(ctx, currentSession)
+	if a.projector != nil {
+		if err := a.messages.FlushAll(genCtx); err != nil {
+			return nil, fmt.Errorf("failed to flush messages before context projection: %w", err)
+		}
+	}
+
+	msgs, err := a.getSessionMessages(genCtx, currentSession)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get session messages: %w", err)
+	}
+
+	// Title eligibility is intentionally computed from the canonical,
+	// summary-bounded snapshot. Projection may change provider-facing copies,
+	// but it must never alter first-user detection or title behavior.
+	hasCanonicalUserText := hasUserTextMessage(msgs)
+
+	if a.projector != nil {
+		defer func() {
+			accountingCtx, cancel := context.WithTimeout(context.WithoutCancel(genCtx), 5*time.Second)
+			defer cancel()
+			if err := a.projector.AccountUsage(accountingCtx, call.SessionID); err != nil {
+				slog.Warn("Failed to account context projection usage", "session_id", call.SessionID, "error", err)
+			}
+		}()
+		projected, projectErr := a.projector.Project(genCtx, call.SessionID, msgs)
+		if projectErr != nil {
+			var projectionErr *condense.ProjectionError
+			if cause := context.Cause(genCtx); cause != nil {
+				return nil, cause
+			}
+			if !condense.IsRecoverable(projectErr) {
+				return nil, projectErr
+			}
+			attrs := []any{
+				"session_id", call.SessionID,
+				"action", "raw_fallback",
+			}
+			if errors.As(projectErr, &projectionErr) {
+				attrs = append(attrs,
+					"error_class", projectionErr.Class,
+					"node_id", projectionErr.NodeID,
+					"batch_key", projectionErr.BatchKey,
+				)
+			}
+			slog.Warn("Context projection failed; using canonical history", attrs...)
+		} else {
+			msgs = projected
+		}
+		if cause := context.Cause(genCtx); cause != nil {
+			return nil, cause
+		}
 	}
 
 	// Generate title from the first real (non-shell) user prompt.
 	// can take tens of seconds. Blocking Run on it delays the
 	// response to the caller. Use a detached context so the title
 	// goroutine survives Run's cancel.
-	if !hasUserTextMessage(msgs) {
+	if !hasCanonicalUserText {
 		titleCtx := context.WithoutCancel(ctx)
 		go a.GenerateTitle(titleCtx, call.SessionID, call.Prompt)
 	}
 
 	// Add the user message to the session.
-	_, err = a.createUserMessage(ctx, call)
+	_, err = a.createUserMessage(genCtx, call)
 	if err != nil {
 		return nil, err
 	}

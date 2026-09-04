@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"sync"
 
@@ -74,6 +75,7 @@ type Service interface {
 	Save(ctx context.Context, session Session) (Session, error)
 	SetChannel(ctx context.Context, sessionID, channel string) (Session, error)
 	UpdateTitleAndUsage(ctx context.Context, sessionID, title string, promptTokens, completionTokens int64, cost float64) error
+	AddUsage(ctx context.Context, sessionID string, promptTokens, completionTokens int64, cost float64) error
 	Rename(ctx context.Context, id string, title string) error
 	Delete(ctx context.Context, id string) error
 
@@ -176,10 +178,15 @@ func (s *service) Fork(ctx context.Context, sessionID string) (Session, error) {
 	return forked, nil
 }
 
+type deleteLifecycle interface {
+	PrepareSessionDelete(context.Context, *db.Queries, string) error
+}
+
 type service struct {
 	*pubsub.Broker[Session]
-	db *sql.DB
-	q  *db.Queries
+	db              *sql.DB
+	q               *db.Queries
+	deleteLifecycle deleteLifecycle
 
 	// Estimated usage stays in memory so fetch-modify-save paths (e.g.,
 	// updating todos or parent-session cost) do not rebuild a session from
@@ -242,6 +249,11 @@ func (s *service) Delete(ctx context.Context, id string) error {
 	dbSession, err := qtx.GetSessionByID(ctx, id)
 	if err != nil {
 		return err
+	}
+	if s.deleteLifecycle != nil {
+		if err := s.deleteLifecycle.PrepareSessionDelete(ctx, qtx, dbSession.ID); err != nil {
+			return fmt.Errorf("preparing projection deletion: %w", err)
+		}
 	}
 	if err = qtx.DeleteSessionMessages(ctx, dbSession.ID); err != nil {
 		return fmt.Errorf("deleting session messages: %w", err)
@@ -338,6 +350,33 @@ func (s *service) SetChannel(ctx context.Context, sessionID, channel string) (Se
 
 // UpdateTitleAndUsage updates only the title and usage fields atomically.
 // This is safer than fetching, modifying, and saving the entire session.
+// AddUsage atomically adds auxiliary provider usage to session totals without
+// replacing the main model's current-context counters.
+func (s *service) AddUsage(ctx context.Context, sessionID string, promptTokens, completionTokens int64, cost float64) error {
+	if promptTokens < 0 || completionTokens < 0 || cost < 0 || math.IsNaN(cost) || math.IsInf(cost, 0) {
+		return fmt.Errorf("session usage is invalid")
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE sessions
+		SET prompt_tokens = prompt_tokens + ?,
+			completion_tokens = completion_tokens + ?,
+			cost = cost + ?,
+			updated_at = strftime('%s', 'now')
+		WHERE id = ?`, promptTokens, completionTokens, cost, sessionID)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return fmt.Errorf("session %s not found", sessionID)
+	}
+	s.publishSessionUpdate(ctx, sessionID)
+	return nil
+}
+
 func (s *service) UpdateTitleAndUsage(ctx context.Context, sessionID, title string, promptTokens, completionTokens int64, cost float64) error {
 	if err := s.q.UpdateSessionTitleAndUsage(ctx, db.UpdateSessionTitleAndUsageParams{
 		ID:               sessionID,
@@ -454,14 +493,32 @@ func unmarshalTodos(data string) ([]Todo, error) {
 	return todos, nil
 }
 
-func NewService(q *db.Queries, conn *sql.DB) Service {
+// ServiceOption configures session lifecycle behavior.
+type ServiceOption func(*service)
+
+// WithDeleteLifecycle adds transaction-bound derived-state cleanup before
+// canonical messages are removed during session deletion.
+func WithDeleteLifecycle(lifecycle interface {
+	PrepareSessionDelete(context.Context, *db.Queries, string) error
+},
+) ServiceOption {
+	return func(s *service) {
+		s.deleteLifecycle = lifecycle
+	}
+}
+
+func NewService(q *db.Queries, conn *sql.DB, opts ...ServiceOption) Service {
 	broker := pubsub.NewBroker[Session]()
-	return &service{
+	s := &service{
 		Broker:         broker,
 		db:             conn,
 		q:              q,
 		estimatedUsage: make(map[string]bool),
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // CreateAgentToolSessionID creates a session ID for agent tool sessions using the format "messageID$$toolCallID"

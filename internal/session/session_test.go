@@ -3,6 +3,9 @@ package session
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"math"
+	"sync"
 	"testing"
 	"time"
 
@@ -103,6 +106,88 @@ func TestEstimatedUsageStateCanBeClearedByExplicitSave(t *testing.T) {
 	refetched, err := sessions.Get(t.Context(), created.ID)
 	require.NoError(t, err)
 	require.False(t, refetched.EstimatedUsage)
+}
+
+func TestAddUsageAccumulatesConcurrentSummarizerTotals(t *testing.T) {
+	sessions, _, _ := newTestServices(t)
+	created, err := sessions.Create(t.Context(), "usage")
+	require.NoError(t, err)
+
+	const additions = 12
+	var wg sync.WaitGroup
+	errs := make(chan error, additions)
+	for range additions {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- sessions.AddUsage(t.Context(), created.ID, 3, 2, 0.25)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	updated, err := sessions.Get(t.Context(), created.ID)
+	require.NoError(t, err)
+	require.Equal(t, int64(additions*3), updated.PromptTokens)
+	require.Equal(t, int64(additions*2), updated.CompletionTokens)
+	require.Equal(t, float64(additions)*0.25, updated.Cost)
+}
+
+func TestAddUsageRejectsInvalidOrMissingSession(t *testing.T) {
+	sessions, _, _ := newTestServices(t)
+	created, err := sessions.Create(t.Context(), "usage")
+	require.NoError(t, err)
+
+	for _, cost := range []float64{-1, math.NaN(), math.Inf(1), math.Inf(-1)} {
+		require.Error(t, sessions.AddUsage(t.Context(), created.ID, 1, 1, cost))
+	}
+	require.Error(t, sessions.AddUsage(t.Context(), created.ID, -1, 1, 0))
+	require.Error(t, sessions.AddUsage(t.Context(), "missing", 1, 1, 1))
+
+	unchanged, err := sessions.Get(t.Context(), created.ID)
+	require.NoError(t, err)
+	require.Zero(t, unchanged.PromptTokens)
+	require.Zero(t, unchanged.CompletionTokens)
+	require.Zero(t, unchanged.Cost)
+}
+
+type failingDeleteLifecycle struct {
+	err error
+}
+
+func (f failingDeleteLifecycle) PrepareSessionDelete(context.Context, *db.Queries, string) error {
+	return f.err
+}
+
+func TestDeleteRollsBackWhenProjectionInvalidationFails(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Cleanup(func() {
+		require.NoError(t, db.Release(dataDir))
+		db.ResetPool()
+	})
+
+	conn, err := db.Connect(t.Context(), dataDir)
+	require.NoError(t, err)
+	queries := db.New(conn)
+	sessions := NewService(queries, conn, WithDeleteLifecycle(failingDeleteLifecycle{err: errors.New("invalidation failed")}))
+	messages := message.NewService(queries, message.WithDebounce(0))
+	created, err := sessions.Create(t.Context(), "delete rollback")
+	require.NoError(t, err)
+	createdMessage, err := messages.Create(t.Context(), created.ID, message.CreateMessageParams{
+		Role: message.User, Parts: []message.ContentPart{message.TextContent{Text: "retained"}},
+	})
+	require.NoError(t, err)
+
+	err = sessions.Delete(t.Context(), created.ID)
+	require.ErrorContains(t, err, "invalidation failed")
+	_, err = sessions.Get(t.Context(), created.ID)
+	require.NoError(t, err)
+	persistedMessage, err := messages.Get(t.Context(), createdMessage.ID)
+	require.NoError(t, err)
+	require.Equal(t, "retained", persistedMessage.Content().Text)
 }
 
 func TestForkCopiesConversationState(t *testing.T) {

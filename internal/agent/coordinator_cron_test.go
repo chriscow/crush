@@ -49,7 +49,11 @@ func TestBuildToolsIncludesCronTools(t *testing.T) {
 
 	built, err := c.buildTools(t.Context(), agentCfg, false)
 	require.NoError(t, err)
-	require.Len(t, built, 3)
+	wantLen := 3
+	if c.contextModule != nil {
+		wantLen++
+	}
+	require.Len(t, built, wantLen)
 
 	names := make(map[string]bool, len(built))
 	for _, tool := range built {

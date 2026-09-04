@@ -58,6 +58,13 @@ type Service interface {
 	Delete(ctx context.Context, id string) error
 	DeleteSessionMessages(ctx context.Context, sessionID string) error
 
+	// PrepareSessionDelete waits for in-flight writes and discards buffered
+	// updates for the session before canonical deletion begins.
+	PrepareSessionDelete(ctx context.Context, sessionID string) error
+	FinishSessionDelete(sessionID string, deleted bool)
+	PrepareSessionSnapshot(ctx context.Context, sessionID string) error
+	FinishSessionSnapshot(sessionID string)
+
 	// Flush synchronously drains any pending debounced state for the
 	// given message ID, performs the SQL write, and publishes the
 	// resulting [pubsub.UpdatedEvent]. Idempotent; cheap no-op if no
@@ -129,13 +136,22 @@ func newFlushBaseline(m *Message) flushBaseline {
 	}
 }
 
+type messageDeleter interface {
+	DeleteMessage(context.Context, string) error
+}
+
 type service struct {
 	*pubsub.Broker[Message]
-	q        db.Querier
-	debounce time.Duration
+	q              db.Querier
+	messageDeleter messageDeleter
+	debounce       time.Duration
 
-	mu      sync.Mutex
-	pending map[string]*pendingState
+	mu              sync.Mutex
+	pending         map[string]*pendingState
+	deleting        map[string]bool
+	sessionDeleting map[string][]string
+	sessionSnapshot map[string]bool
+	creating        map[string]int
 }
 
 // ServiceOption configures a [Service] at construction.
@@ -150,12 +166,24 @@ func WithDebounce(d time.Duration) ServiceOption {
 	}
 }
 
+// WithMessageDeleter routes individual deletions through a lifecycle-aware
+// store while preserving this service's pending-state and event behavior.
+func WithMessageDeleter(deleter messageDeleter) ServiceOption {
+	return func(s *service) {
+		s.messageDeleter = deleter
+	}
+}
+
 func NewService(q db.Querier, opts ...ServiceOption) Service {
 	s := &service{
-		Broker:   pubsub.NewBroker[Message](),
-		q:        q,
-		debounce: defaultUpdateDebounce,
-		pending:  make(map[string]*pendingState),
+		Broker:          pubsub.NewBroker[Message](),
+		q:               q,
+		debounce:        defaultUpdateDebounce,
+		pending:         make(map[string]*pendingState),
+		deleting:        make(map[string]bool),
+		sessionDeleting: make(map[string][]string),
+		sessionSnapshot: make(map[string]bool),
+		creating:        make(map[string]int),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -168,27 +196,90 @@ func (s *service) Delete(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	err = s.q.DeleteMessage(ctx, message.ID)
+	if err := s.beginDelete(ctx, id); err != nil {
+		return err
+	}
+	deleted := false
+	defer func() { s.finishDelete(id, deleted) }()
+
+	if s.messageDeleter != nil {
+		err = s.messageDeleter.DeleteMessage(ctx, message.ID)
+	} else {
+		err = s.q.DeleteMessage(ctx, message.ID)
+	}
 	if err != nil {
 		return err
 	}
-	// Drop any pending coalesced state for this ID. We never want to
-	// flush back over a deleted row.
-	s.mu.Lock()
-	if p, ok := s.pending[id]; ok {
-		if p.timer != nil {
-			p.timer.Stop()
-		}
-		delete(s.pending, id)
-	}
-	s.mu.Unlock()
+	deleted = true
 	// Clone the message before publishing to avoid race conditions with
 	// concurrent modifications to the Parts slice.
 	s.Publish(pubsub.DeletedEvent, message.Clone())
 	return nil
 }
 
+func (s *service) beginDelete(ctx context.Context, id string) error {
+	for {
+		s.mu.Lock()
+		if s.deleting[id] {
+			s.mu.Unlock()
+			return fmt.Errorf("message %s is already being deleted", id)
+		}
+		s.deleting[id] = true
+		p, ok := s.pending[id]
+		if ok && p.timer != nil {
+			p.timer.Stop()
+			p.timer = nil
+		}
+		if !ok || !p.flushing {
+			s.mu.Unlock()
+			return nil
+		}
+		delete(s.deleting, id)
+		s.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
+func (s *service) finishDelete(id string, deleted bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.deleting, id)
+	if deleted {
+		delete(s.pending, id)
+		return
+	}
+	if p := s.pending[id]; p != nil && p.dirty && p.timer == nil && !p.flushing && s.debounce > 0 {
+		p.timer = time.AfterFunc(s.debounce, func() {
+			_ = s.flushOne(context.Background(), id, false)
+		})
+	}
+}
+
 func (s *service) Create(ctx context.Context, sessionID string, params CreateMessageParams) (Message, error) {
+	s.mu.Lock()
+	if _, deleting := s.sessionDeleting[sessionID]; deleting {
+		s.mu.Unlock()
+		return Message{}, fmt.Errorf("session %s is being deleted", sessionID)
+	}
+	if s.sessionSnapshot[sessionID] {
+		s.mu.Unlock()
+		return Message{}, fmt.Errorf("session %s is being snapshotted", sessionID)
+	}
+	s.creating[sessionID]++
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.creating[sessionID]--
+		if s.creating[sessionID] == 0 {
+			delete(s.creating, sessionID)
+		}
+		s.mu.Unlock()
+	}()
+
 	if params.Role != Assistant {
 		params.Parts = append(params.Parts, Finish{
 			Reason: "stop",
@@ -224,6 +315,121 @@ func (s *service) Create(ctx context.Context, sessionID string, params CreateMes
 	return message, nil
 }
 
+// PrepareSessionDelete implements the application-level deletion barrier.
+func (s *service) PrepareSessionDelete(ctx context.Context, sessionID string) error {
+	s.mu.Lock()
+	if _, deleting := s.sessionDeleting[sessionID]; deleting {
+		s.mu.Unlock()
+		return fmt.Errorf("session %s is already being deleted", sessionID)
+	}
+	s.sessionDeleting[sessionID] = nil
+	s.mu.Unlock()
+
+	for {
+		s.mu.Lock()
+		creating := s.creating[sessionID]
+		s.mu.Unlock()
+		if creating == 0 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			s.FinishSessionDelete(sessionID, false)
+			return context.Cause(ctx)
+		case <-time.After(time.Millisecond):
+		}
+	}
+
+	messages, err := s.List(ctx, sessionID)
+	if err != nil {
+		s.FinishSessionDelete(sessionID, false)
+		return err
+	}
+	prepared := make([]string, 0, len(messages))
+	for _, msg := range messages {
+		if err := s.beginDelete(ctx, msg.ID); err != nil {
+			s.mu.Lock()
+			s.sessionDeleting[sessionID] = prepared
+			s.mu.Unlock()
+			s.FinishSessionDelete(sessionID, false)
+			return err
+		}
+		prepared = append(prepared, msg.ID)
+	}
+	s.mu.Lock()
+	s.sessionDeleting[sessionID] = prepared
+	s.mu.Unlock()
+	return nil
+}
+
+// FinishSessionDelete releases the session deletion barrier. Successful
+// deletion discards buffered state; rollback re-arms pending debounce timers.
+func (s *service) FinishSessionDelete(sessionID string, deleted bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ids, prepared := s.sessionDeleting[sessionID]
+	if !prepared {
+		return
+	}
+	for _, id := range ids {
+		delete(s.deleting, id)
+		if deleted {
+			delete(s.pending, id)
+			continue
+		}
+		if p := s.pending[id]; p != nil && p.dirty && p.timer == nil && !p.flushing && s.debounce > 0 {
+			messageID := id
+			p.timer = time.AfterFunc(s.debounce, func() {
+				_ = s.flushOne(context.Background(), messageID, false)
+			})
+		}
+	}
+	delete(s.sessionDeleting, sessionID)
+}
+
+// PrepareSessionSnapshot blocks new writes and flushes accepted updates before
+// a caller takes a canonical session snapshot such as a fork.
+func (s *service) PrepareSessionSnapshot(ctx context.Context, sessionID string) error {
+	s.mu.Lock()
+	if _, deleting := s.sessionDeleting[sessionID]; deleting {
+		s.mu.Unlock()
+		return fmt.Errorf("session %s is being deleted", sessionID)
+	}
+	if s.sessionSnapshot[sessionID] {
+		s.mu.Unlock()
+		return fmt.Errorf("session %s is already being snapshotted", sessionID)
+	}
+	s.sessionSnapshot[sessionID] = true
+	s.mu.Unlock()
+	for {
+		s.mu.Lock()
+		creating := s.creating[sessionID]
+		s.mu.Unlock()
+		if creating == 0 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			s.FinishSessionSnapshot(sessionID)
+			return context.Cause(ctx)
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if err := s.FlushAll(ctx); err != nil {
+		s.FinishSessionSnapshot(sessionID)
+		return err
+	}
+	return nil
+}
+
+// FinishSessionSnapshot releases a canonical snapshot write barrier.
+func (s *service) FinishSessionSnapshot(sessionID string) {
+	s.mu.Lock()
+	delete(s.sessionSnapshot, sessionID)
+	s.mu.Unlock()
+}
+
 func (s *service) DeleteSessionMessages(ctx context.Context, sessionID string) error {
 	messages, err := s.List(ctx, sessionID)
 	if err != nil {
@@ -251,6 +457,18 @@ func (s *service) Update(ctx context.Context, msg Message) error {
 	// that explicitly opted out via [WithDebounce].
 	if s.debounce <= 0 {
 		s.mu.Lock()
+		if _, deleting := s.sessionDeleting[msg.SessionID]; deleting {
+			s.mu.Unlock()
+			return fmt.Errorf("session %s is being deleted", msg.SessionID)
+		}
+		if s.sessionSnapshot[msg.SessionID] {
+			s.mu.Unlock()
+			return fmt.Errorf("session %s is being snapshotted", msg.SessionID)
+		}
+		if s.deleting[msg.ID] {
+			s.mu.Unlock()
+			return fmt.Errorf("message %s is being deleted", msg.ID)
+		}
 		p, ok := s.pending[msg.ID]
 		if !ok {
 			p = &pendingState{}
@@ -263,6 +481,18 @@ func (s *service) Update(ctx context.Context, msg Message) error {
 	}
 
 	s.mu.Lock()
+	if _, deleting := s.sessionDeleting[msg.SessionID]; deleting {
+		s.mu.Unlock()
+		return fmt.Errorf("session %s is being deleted", msg.SessionID)
+	}
+	if s.sessionSnapshot[msg.SessionID] {
+		s.mu.Unlock()
+		return fmt.Errorf("session %s is being snapshotted", msg.SessionID)
+	}
+	if s.deleting[msg.ID] {
+		s.mu.Unlock()
+		return fmt.Errorf("message %s is being deleted", msg.ID)
+	}
 	p, ok := s.pending[msg.ID]
 	if !ok {
 		p = &pendingState{}
@@ -345,6 +575,10 @@ func (s *service) flushOne(ctx context.Context, id string, syncCaller bool) erro
 	for {
 		s.mu.Lock()
 		p, ok := s.pending[id]
+		if s.deleting[id] {
+			s.mu.Unlock()
+			return nil
+		}
 		if !ok {
 			s.mu.Unlock()
 			return nil
@@ -589,7 +823,7 @@ func (s *service) GetLastAssistantMessage(ctx context.Context, sessionID string)
 }
 
 func (s *service) fromDBItem(item db.Message) (Message, error) {
-	parts, err := unmarshalParts([]byte(item.Parts))
+	parts, err := DecodeParts([]byte(item.Parts))
 	if err != nil {
 		return Message{}, err
 	}
@@ -668,6 +902,13 @@ func marshalParts(parts []ContentPart) ([]byte, error) {
 type rawPartWrapper struct {
 	Type partType        `json:"type"`
 	Data json.RawMessage `json:"data"`
+}
+
+// DecodeParts decodes the tagged JSON representation stored in
+// messages.parts. It is the shared persistence codec for canonical
+// message reconstruction.
+func DecodeParts(data []byte) ([]ContentPart, error) {
+	return unmarshalParts(data)
 }
 
 func unmarshalParts(data []byte) ([]ContentPart, error) {

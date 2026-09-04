@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools"
@@ -37,6 +38,69 @@ func wrapToolsWithHooks(tools []fantasy.AgentTool, runner *hooks.Runner, isSubAg
 		out[i] = newHookedTool(tool, runner)
 	}
 	return out
+}
+
+// recoveryAuditTool intentionally does not run PreToolUse. Recovery is a
+// read-only infrastructure capability needed to satisfy visible references;
+// existing pre-use hooks can deny and rewrite and therefore cannot serve as a
+// post-execution audit hook. Emit only content-free structured diagnostics.
+type recoveryAuditTool struct {
+	inner fantasy.AgentTool
+}
+
+func newRecoveryAuditTool(inner fantasy.AgentTool) fantasy.AgentTool {
+	return &recoveryAuditTool{inner: inner}
+}
+
+func (t *recoveryAuditTool) Info() fantasy.ToolInfo { return t.inner.Info() }
+func (t *recoveryAuditTool) ProviderOptions() fantasy.ProviderOptions {
+	return t.inner.ProviderOptions()
+}
+func (t *recoveryAuditTool) SetProviderOptions(opts fantasy.ProviderOptions) {
+	t.inner.SetProviderOptions(opts)
+}
+
+func (t *recoveryAuditTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+	started := time.Now()
+	resp, err := t.inner.Run(ctx, call)
+	status := "error"
+	ref := ""
+	offset := 0
+	limit := 0
+	var input struct {
+		Ref    string `json:"ref"`
+		Offset int    `json:"offset"`
+		Limit  *int   `json:"limit"`
+	}
+	if json.Unmarshal([]byte(call.Input), &input) == nil {
+		ref = input.Ref
+		offset = input.Offset
+		if input.Limit != nil {
+			limit = *input.Limit
+		}
+	}
+	if err == nil {
+		var result struct {
+			Status string `json:"status"`
+		}
+		if json.Unmarshal([]byte(resp.Content), &result) == nil && result.Status != "" {
+			status = result.Status
+		} else if resp.IsError {
+			status = "invalid_request"
+		} else {
+			status = "ok"
+		}
+	}
+	slog.Info("Context recovery tool completed",
+		"tool", call.Name,
+		"session_id", tools.GetSessionFromContext(ctx),
+		"ref", ref,
+		"offset", offset,
+		"limit", limit,
+		"status", status,
+		"duration_ms", time.Since(started).Milliseconds(),
+	)
+	return resp, err
 }
 
 func (h *hookedTool) Info() fantasy.ToolInfo {

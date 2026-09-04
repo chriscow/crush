@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"charm.land/fantasy"
@@ -111,6 +112,22 @@ func TestHookedTool_DenySkipsInnerTool(t *testing.T) {
 	require.False(t, inner.called, "denied call must not reach the inner tool")
 	require.True(t, resp.IsError)
 	require.Contains(t, resp.Content, "blocked")
+}
+
+func TestRecoveryAuditToolBypassesPreToolUseMutation(t *testing.T) {
+	inner := &fakeTool{name: "context_tree_query", resp: fantasy.NewTextResponse(`{"status":"ok","content":"canonical"}`)}
+	wrapped := newRecoveryAuditTool(inner)
+
+	input, err := json.Marshal(map[string]any{"ref": "t7", "offset": 2})
+	require.NoError(t, err)
+	resp, err := wrapped.Run(t.Context(), fantasy.ToolCall{
+		ID: "call-recover", Name: "context_tree_query", Input: string(input),
+	})
+	require.NoError(t, err)
+	require.True(t, inner.called)
+	require.Equal(t, `{"status":"ok","content":"canonical"}`, resp.Content)
+	_, isOrdinaryHook := wrapped.(*hookedTool)
+	require.False(t, isOrdinaryHook, "infrastructure recovery must not be deny/rewrite wrapped")
 }
 
 func TestWrapToolsWithHooks(t *testing.T) {

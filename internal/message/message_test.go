@@ -23,6 +23,23 @@ type slowUpdateQuerier struct {
 	startOnce sync.Once
 }
 
+type slowCreateQuerier struct {
+	db.Querier
+	release   chan struct{}
+	started   chan struct{}
+	startOnce sync.Once
+}
+
+func (s *slowCreateQuerier) CreateMessage(ctx context.Context, arg db.CreateMessageParams) (db.Message, error) {
+	s.startOnce.Do(func() { close(s.started) })
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+		return db.Message{}, ctx.Err()
+	}
+	return s.Querier.CreateMessage(ctx, arg)
+}
+
 func (s *slowUpdateQuerier) UpdateMessage(ctx context.Context, arg db.UpdateMessageParams) error {
 	s.startOnce.Do(func() { close(s.started) })
 	select {
@@ -331,6 +348,172 @@ func TestDelete_DropsPendingState(t *testing.T) {
 
 	_, err = svc.Get(t.Context(), msg.ID)
 	require.Error(t, err, "deleted message must remain deleted")
+}
+
+func TestDeleteWaitsForInFlightUpdate(t *testing.T) {
+	t.Parallel()
+
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	q := db.New(conn)
+	sessions := session.NewService(q, conn)
+	sess, err := sessions.Create(t.Context(), "delete race")
+	require.NoError(t, err)
+	slow := &slowUpdateQuerier{
+		Querier: q,
+		release: make(chan struct{}),
+		started: make(chan struct{}),
+	}
+	svc := NewService(slow, WithDebounce(10*time.Millisecond))
+	msg, err := svc.Create(t.Context(), sess.ID, CreateMessageParams{Role: Assistant})
+	require.NoError(t, err)
+	msg.AppendContent("pending")
+	require.NoError(t, svc.Update(t.Context(), msg))
+
+	select {
+	case <-slow.started:
+	case <-time.After(time.Second):
+		t.Fatal("timer-fired update did not start")
+	}
+	deleteDone := make(chan error, 1)
+	go func() { deleteDone <- svc.Delete(t.Context(), msg.ID) }()
+	select {
+	case err := <-deleteDone:
+		t.Fatalf("delete returned before in-flight update completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(slow.release)
+	require.NoError(t, <-deleteDone)
+	_, err = svc.Get(t.Context(), msg.ID)
+	require.Error(t, err)
+}
+
+func TestPrepareSessionDeleteWaitsForInFlightUpdate(t *testing.T) {
+	t.Parallel()
+
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	q := db.New(conn)
+	sessions := session.NewService(q, conn)
+	sess, err := sessions.Create(t.Context(), "session delete race")
+	require.NoError(t, err)
+	slow := &slowUpdateQuerier{
+		Querier: q,
+		release: make(chan struct{}),
+		started: make(chan struct{}),
+	}
+	svc := NewService(slow, WithDebounce(10*time.Millisecond))
+	msg, err := svc.Create(t.Context(), sess.ID, CreateMessageParams{Role: Assistant})
+	require.NoError(t, err)
+	msg.AppendContent("pending")
+	require.NoError(t, svc.Update(t.Context(), msg))
+
+	select {
+	case <-slow.started:
+	case <-time.After(time.Second):
+		t.Fatal("timer-fired update did not start")
+	}
+	prepareDone := make(chan error, 1)
+	go func() { prepareDone <- svc.PrepareSessionDelete(t.Context(), sess.ID) }()
+	select {
+	case err := <-prepareDone:
+		t.Fatalf("prepare returned before in-flight update completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(slow.release)
+	require.NoError(t, <-prepareDone)
+	defer svc.FinishSessionDelete(sess.ID, false)
+
+	msg.AppendContent("blocked")
+	require.Error(t, svc.Update(t.Context(), msg))
+}
+
+func TestPrepareSessionDeleteDropsPendingUpdates(t *testing.T) {
+	t.Parallel()
+
+	svc, sessionID := newTestService(t, WithDebounce(time.Hour))
+	msg, err := svc.Create(t.Context(), sessionID, CreateMessageParams{Role: Assistant})
+	require.NoError(t, err)
+	msg.AppendContent("pending")
+	require.NoError(t, svc.Update(t.Context(), msg))
+
+	require.NoError(t, svc.PrepareSessionDelete(t.Context(), sessionID))
+	svc.FinishSessionDelete(sessionID, true)
+	require.NoError(t, svc.FlushAll(t.Context()))
+	persisted, err := svc.Get(t.Context(), msg.ID)
+	require.NoError(t, err)
+	require.Empty(t, persisted.Content().Text)
+}
+
+func TestPrepareSessionDeleteWaitsForCreateAndBlocksNewWrites(t *testing.T) {
+	t.Parallel()
+
+	conn, err := db.Connect(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	q := db.New(conn)
+	sessions := session.NewService(q, conn)
+	sess, err := sessions.Create(t.Context(), "create race")
+	require.NoError(t, err)
+	slow := &slowCreateQuerier{
+		Querier: q,
+		release: make(chan struct{}),
+		started: make(chan struct{}),
+	}
+	svc := NewService(slow, WithDebounce(time.Hour))
+
+	createDone := make(chan error, 1)
+	go func() {
+		_, createErr := svc.Create(t.Context(), sess.ID, CreateMessageParams{Role: Assistant})
+		createDone <- createErr
+	}()
+	select {
+	case <-slow.started:
+	case <-time.After(time.Second):
+		t.Fatal("message create did not start")
+	}
+
+	prepareDone := make(chan error, 1)
+	go func() { prepareDone <- svc.PrepareSessionDelete(t.Context(), sess.ID) }()
+	require.Eventually(t, func() bool {
+		createCtx, cancel := context.WithTimeout(t.Context(), time.Millisecond)
+		defer cancel()
+		_, createErr := svc.Create(createCtx, sess.ID, CreateMessageParams{Role: Assistant})
+		return createErr != nil && strings.Contains(createErr.Error(), "being deleted")
+	}, time.Second, time.Millisecond, "session barrier did not block new creates")
+	select {
+	case err := <-prepareDone:
+		t.Fatalf("prepare returned before in-flight create completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(slow.release)
+	require.NoError(t, <-createDone)
+	require.NoError(t, <-prepareDone)
+	defer svc.FinishSessionDelete(sess.ID, false)
+
+	messages, err := svc.List(t.Context(), sess.ID)
+	require.NoError(t, err)
+	require.Len(t, messages, 1)
+	messages[0].AppendContent("blocked")
+	require.Error(t, svc.Update(t.Context(), messages[0]))
+}
+
+func TestFinishSessionDeleteRollbackReleasesWrites(t *testing.T) {
+	t.Parallel()
+
+	svc, sessionID := newTestService(t, WithDebounce(time.Hour))
+	msg, err := svc.Create(t.Context(), sessionID, CreateMessageParams{Role: Assistant})
+	require.NoError(t, err)
+	require.NoError(t, svc.PrepareSessionDelete(t.Context(), sessionID))
+	svc.FinishSessionDelete(sessionID, false)
+
+	msg.AppendContent("allowed")
+	require.NoError(t, svc.Update(t.Context(), msg))
+	_, err = svc.Create(t.Context(), sessionID, CreateMessageParams{Role: Assistant})
+	require.NoError(t, err)
 }
 
 func TestBroker_PublishLossyDropCounter(t *testing.T) {

@@ -62,13 +62,23 @@ func (w *AppWorkspace) SaveSession(ctx context.Context, sess session.Session) (s
 }
 
 func (w *AppWorkspace) DeleteSession(ctx context.Context, sessionID string) error {
-	return w.app.Sessions.Delete(ctx, sessionID)
+	if err := w.app.Messages.PrepareSessionDelete(ctx, sessionID); err != nil {
+		return fmt.Errorf("prepare message deletion: %w", err)
+	}
+	deleted := false
+	defer func() { w.app.Messages.FinishSessionDelete(sessionID, deleted) }()
+	if err := w.app.Sessions.Delete(ctx, sessionID); err != nil {
+		return err
+	}
+	deleted = true
+	return nil
 }
 
 func (w *AppWorkspace) ForkSession(ctx context.Context, sessionID string) (session.Session, error) {
-	if err := w.app.Messages.FlushAll(ctx); err != nil {
+	if err := w.app.Messages.PrepareSessionSnapshot(ctx, sessionID); err != nil {
 		return session.Session{}, err
 	}
+	defer w.app.Messages.FinishSessionSnapshot(sessionID)
 	return w.app.Sessions.Fork(ctx, sessionID)
 }
 

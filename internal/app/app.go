@@ -21,6 +21,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/clipboard"
+	"github.com/charmbracelet/crush/internal/condense"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/event"
@@ -66,7 +67,8 @@ type App struct {
 
 	Skills *skills.Manager
 
-	config *config.ConfigStore
+	projectionStore *condense.Store
+	config          *config.ConfigStore
 
 	serviceEventsWG *sync.WaitGroup
 	eventsCtx       context.Context
@@ -96,8 +98,9 @@ type App struct {
 // skills.NewManager + skills.DiscoverFromConfig).
 func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr *skills.Manager) (*App, error) {
 	q := db.New(conn)
-	sessions := session.NewService(q, conn)
-	messages := message.NewService(q)
+	projectionStore := condense.NewStore(q, conn)
+	sessions := session.NewService(q, conn, session.WithDeleteLifecycle(projectionStore))
+	messages := message.NewService(q, message.WithMessageDeleter(projectionStore))
 	files := history.NewService(q, conn)
 	cfg := store.Config()
 	skipPermissionsRequests := store.Overrides().SkipPermissionRequests
@@ -107,14 +110,15 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 	}
 
 	app := &App{
-		Sessions:    sessions,
-		Messages:    messages,
-		History:     files,
-		Permissions: permission.NewPermissionService(store.WorkingDir(), skipPermissionsRequests, allowedTools),
-		Questions:   question.NewService(),
-		FileTracker: filetracker.NewService(q),
-		LSPManager:  lsp.NewManager(store),
-		Skills:      skillsMgr,
+		Sessions:        sessions,
+		Messages:        messages,
+		History:         files,
+		Permissions:     permission.NewPermissionService(store.WorkingDir(), skipPermissionsRequests, allowedTools),
+		Questions:       question.NewService(),
+		FileTracker:     filetracker.NewService(q),
+		LSPManager:      lsp.NewManager(store),
+		Skills:          skillsMgr,
+		projectionStore: projectionStore,
 
 		globalCtx: ctx,
 
@@ -801,18 +805,19 @@ func (app *App) initCoderAgent(ctx context.Context, interactive bool) error {
 	}
 	var err error
 	app.AgentCoordinator, err = agent.NewCoordinator(ctx, agent.CoordinatorOptions{
-		Config:      app.config,
-		Sessions:    app.Sessions,
-		Messages:    app.Messages,
-		Permissions: app.Permissions,
-		Questions:   app.Questions,
-		History:     app.History,
-		FileTracker: app.FileTracker,
-		LSPManager:  app.LSPManager,
-		Notify:      app.agentNotifications,
-		RunComplete: app.runCompletions,
-		Skills:      app.Skills,
-		Interactive: interactive,
+		Config:          app.config,
+		Sessions:        app.Sessions,
+		Messages:        app.Messages,
+		Permissions:     app.Permissions,
+		Questions:       app.Questions,
+		History:         app.History,
+		FileTracker:     app.FileTracker,
+		LSPManager:      app.LSPManager,
+		Notify:          app.agentNotifications,
+		RunComplete:     app.runCompletions,
+		Skills:          app.Skills,
+		Interactive:     interactive,
+		ProjectionStore: app.projectionStore,
 	})
 	if err != nil {
 		slog.Error("Failed to create coder agent", "err", err)

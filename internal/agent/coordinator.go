@@ -26,6 +26,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/prompt"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
+	"github.com/charmbracelet/crush/internal/condense"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/discover"
 	"github.com/charmbracelet/crush/internal/event"
@@ -60,10 +61,16 @@ import (
 
 // Coordinator errors.
 var (
-	errCoderAgentNotConfigured    = errors.New("coder agent not configured")
-	errPlanAgentNotConfigured     = errors.New("plan agent not configured")
-	errMainAgentNotFound          = errors.New("main agent not found")
-	errModelProviderNotConfigured = errors.New("model provider not configured")
+	errCoderAgentNotConfigured         = errors.New("coder agent not configured")
+	errPlanAgentNotConfigured          = errors.New("plan agent not configured")
+	errMainAgentNotFound               = errors.New("main agent not found")
+	errModelProviderNotConfigured      = errors.New("model provider not configured")
+	errLargeModelNotSelected           = errors.New("large model not selected")
+	errSmallModelNotSelected           = errors.New("small model not selected")
+	errLargeModelProviderNotConfigured = errors.New("large model provider not configured")
+	errSmallModelProviderNotConfigured = errors.New("small model provider not configured")
+	errLargeModelNotFound              = errors.New("large model not found in provider config")
+	errSmallModelNotFound              = errors.New("small model not found in provider config")
 )
 
 // Copilot models that use the Responses API instead of Chat Completions.
@@ -157,12 +164,17 @@ type coordinator struct {
 	agentMu       sync.RWMutex
 	mainAgent     SessionAgent
 	mainAgentName string
-	agents        map[string]SessionAgent
 
-	cronStore      *scheduler.Store
-	cronMu         sync.Mutex
-	skillReloadMu  sync.Mutex
-	scheduledRun   func(context.Context, string, string) error
+	projectionStore   *condense.Store
+	contextModule     *condense.Module
+	contextSummarizer *fantasyCondenseSummarizer
+	contextMu         sync.Mutex
+
+	agents map[string]SessionAgent
+
+	cronStore    *scheduler.Store
+	cronMu       sync.Mutex
+	scheduledRun func(context.Context, string, string) error
 
 	// Skills discovery results (session-start snapshot).
 	allSkills    []*skills.Skill // Pre-filter: all discovered after dedup.
@@ -177,31 +189,25 @@ type coordinator struct {
 // struct keeps the constructor self-documenting and avoids a long
 // positional parameter list.
 type CoordinatorOptions struct {
-	Config      *config.ConfigStore
-	Sessions    session.Service
-	Messages    message.Service
-	Permissions permission.Service
-	Questions   question.Service
-	History     history.Service
-	FileTracker filetracker.Service
-	LSPManager  *lsp.Manager
-	Notify      pubsub.Publisher[notify.Notification]
-	RunComplete pubsub.Publisher[notify.RunComplete]
-	Skills      *skills.Manager
-	Interactive bool
+	Config          *config.ConfigStore
+	Sessions        session.Service
+	Messages        message.Service
+	Permissions     permission.Service
+	Questions       question.Service
+	History         history.Service
+	FileTracker     filetracker.Service
+	LSPManager      *lsp.Manager
+	Notify          pubsub.Publisher[notify.Notification]
+	RunComplete     pubsub.Publisher[notify.RunComplete]
+	Skills          *skills.Manager
+	Interactive     bool
+	ProjectionStore *condense.Store
 }
 
 func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, error) {
-	// Skills are pre-discovered by the caller (see app.New /
-	// backend.CreateWorkspace) and passed in via the manager. If no
-	// manager was provided (legacy callers), fall back to an in-line
-	// discovery so the coordinator still works.
 	var allSkills, activeSkills []*skills.Skill
 	if opts.Skills != nil {
-		allSkills = opts.Skills.AllSkills()
-		activeSkills = opts.Skills.ActiveSkills()
-	} else {
-		allSkills, activeSkills = discoverSkills(opts.Config)
+		allSkills, activeSkills = opts.Skills.SkillSnapshot()
 	}
 	skillTracker := skills.NewTracker(activeSkills)
 
@@ -211,23 +217,24 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 	}
 
 	c := &coordinator{
-		cfg:          opts.Config,
-		sessions:     opts.Sessions,
-		messages:     opts.Messages,
-		permissions:  opts.Permissions,
-		questions:    opts.Questions,
-		history:      opts.History,
-		filetracker:  opts.FileTracker,
-		lspManager:   opts.LSPManager,
-		notify:       opts.Notify,
-		runComplete:  opts.RunComplete,
-		agents:       make(map[string]SessionAgent),
-		cronStore:    cronStore,
-		allSkills:    allSkills,
-		activeSkills: activeSkills,
-		skillTracker: skillTracker,
-		skillsMgr:    opts.Skills,
-		interactive:  opts.Interactive,
+		cfg:             opts.Config,
+		sessions:        opts.Sessions,
+		messages:        opts.Messages,
+		permissions:     opts.Permissions,
+		questions:       opts.Questions,
+		history:         opts.History,
+		filetracker:     opts.FileTracker,
+		lspManager:      opts.LSPManager,
+		notify:          opts.Notify,
+		runComplete:     opts.RunComplete,
+		agents:          make(map[string]SessionAgent),
+		cronStore:       cronStore,
+		allSkills:       allSkills,
+		activeSkills:    activeSkills,
+		skillTracker:    skillTracker,
+		skillsMgr:       opts.Skills,
+		interactive:     opts.Interactive,
+		projectionStore: opts.ProjectionStore,
 	}
 
 	logPromptSkillStats(activeSkills)
@@ -256,7 +263,10 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		return nil, errPlanAgentNotConfigured
 	}
 
-	planSystemPrompt, err := planPrompt(prompt.WithWorkingDir(c.cfg.WorkingDir()))
+	planSystemPrompt, err := planPrompt(
+		prompt.WithWorkingDir(c.cfg.WorkingDir()),
+		prompt.WithSkills(c.activeSkills),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -811,6 +821,52 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 	return options
 }
 
+func (c *coordinator) contextProjectionOptions(projection config.ContextProjectionOptions, selected Model, provider config.ProviderConfig) (condense.Options, error) {
+	options := condense.Options{
+		Enabled:           projection.Enabled,
+		MinBatchChars:     projection.GetMinBatchChars(),
+		KeepRecentBatches: projection.GetKeepRecentBatches(),
+		SummarizerTimeout: projection.SummarizerTimeout,
+	}
+	apiKey, err := c.cfg.Resolve(provider.APIKey)
+	if err != nil {
+		return condense.Options{}, fmt.Errorf("resolve context projection provider API key: %w", err)
+	}
+	baseURL, err := c.cfg.Resolve(provider.BaseURL)
+	if err != nil {
+		return condense.Options{}, fmt.Errorf("resolve context projection provider base URL: %w", err)
+	}
+	identityInput := struct {
+		ProviderID              string
+		ProviderType            catwalk.Type
+		BaseURL                 string
+		APIKey                  string
+		OAuth                   *oauth.Token
+		ExtraHeaders            map[string]string
+		ExtraBody               map[string]any
+		ProviderOptions         map[string]any
+		ExtraParams             map[string]string
+		AWSAuthRefresh          string
+		FlatRate                bool
+		Model                   config.SelectedModel
+		CatwalkModel            catwalk.Model
+		EffectiveProviderOption fantasy.ProviderOptions
+	}{
+		ProviderID: provider.ID, ProviderType: provider.Type, BaseURL: baseURL,
+		APIKey: apiKey, OAuth: provider.OAuthToken, ExtraHeaders: provider.ExtraHeaders,
+		ExtraBody: provider.ExtraBody, ProviderOptions: provider.ProviderOptions,
+		ExtraParams: provider.ExtraParams, AWSAuthRefresh: provider.AWSAuthRefresh,
+		FlatRate: provider.FlatRate, Model: selected.ModelCfg, CatwalkModel: selected.CatwalkCfg,
+		EffectiveProviderOption: getProviderOptions(selected, provider),
+	}
+	encoded, err := json.Marshal(identityInput)
+	if err != nil {
+		return condense.Options{}, fmt.Errorf("encode context projection configuration identity: %w", err)
+	}
+	options.ConfigurationID = condense.ConfigurationID(options, string(encoded))
+	return options, nil
+}
+
 func mergeCallOptions(model Model, cfg config.ProviderConfig) (fantasy.ProviderOptions, *float64, *float64, *int64, *float64, *float64) {
 	modelOptions := getProviderOptions(model, cfg)
 	temp := cmp.Or(model.ModelCfg.Temperature, model.CatwalkCfg.Options.Temperature)
@@ -828,6 +884,45 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 	}
 
 	primaryProviderCfg, _ := c.cfg.Config().Providers.Get(primary.ModelCfg.Provider)
+	var projector contextProjector
+	if !isSubAgent && c.projectionStore != nil {
+		c.contextMu.Lock()
+		defer c.contextMu.Unlock()
+		projection := c.cfg.Config().Options.ContextProjection
+		if projection == nil {
+			return nil, errors.New("context projection options are unavailable")
+		}
+		if c.contextModule == nil {
+			if !projection.Enabled {
+				options := condense.Options{
+					Enabled: false, MinBatchChars: projection.GetMinBatchChars(),
+					KeepRecentBatches: projection.GetKeepRecentBatches(), SummarizerTimeout: projection.SummarizerTimeout,
+				}
+				c.contextModule = condense.New(c.projectionStore, nil, options)
+			} else {
+				selected, err := c.buildCondenseModel(ctx, projection.SummarizerModel)
+				if err != nil {
+					return nil, fmt.Errorf("build context projection summarizer model: %w", err)
+				}
+				providerCfg, ok := c.cfg.Config().Providers.Get(selected.ModelCfg.Provider)
+				if !ok {
+					return nil, fmt.Errorf("context projection summarizer provider %q not configured", selected.ModelCfg.Provider)
+				}
+				options, err := c.contextProjectionOptions(*projection, selected, providerCfg)
+				if err != nil {
+					return nil, err
+				}
+				c.contextSummarizer = newFantasyCondenseSummarizer(
+					selected,
+					getProviderOptions(selected, providerCfg),
+					projection.SummarizerTimeout,
+				)
+				c.contextModule = condense.New(c.projectionStore, c.contextSummarizer, options)
+			}
+		}
+		projector = c.contextModule
+	}
+
 	result := NewSessionAgent(SessionAgentOptions{
 		LargeModel:           primary,
 		SmallModel:           small,
@@ -838,7 +933,8 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		IsYolo:               c.permissions.SkipRequests(),
 		Sessions:             c.sessions,
 		Messages:             c.messages,
-		Cfg:                  c.cfg,
+		Cfg:       c.cfg,
+		Projector: projector,
 		Tools:                nil,
 		Notify:               c.notify,
 		RunComplete:          c.runComplete,
@@ -916,10 +1012,10 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		tools.NewBashTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Options.DataDirectory, c.cfg.Config().Options.Attribution, modelID),
 		tools.NewCrushInfoTool(c.cfg, c.lspManager, c.allSkills, c.activeSkills, c.skillTracker),
 		tools.NewCrushLogsTool(logFile),
+		tools.NewJobOutputTool(c.cfg.Config().Options.DataDirectory),
 		tools.NewCronCreateTool(c.cronStore),
 		tools.NewCronListTool(c.cronStore),
 		tools.NewCronDeleteTool(c.cronStore),
-		tools.NewJobOutputTool(c.cfg.Config().Options.DataDirectory),
 		tools.NewJobKillTool(),
 		tools.NewDownloadTool(c.permissions, c.cfg.WorkingDir(), nil),
 		tools.NewEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
@@ -992,22 +1088,54 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 			slog.Debug("MCP not allowed", "tool", tool.Name(), "agent", agent.Name)
 		}
 	}
+	c.contextMu.Lock()
+	contextModule := c.contextModule
+	c.contextMu.Unlock()
+	registerRecovery := !isSubAgent && contextModule != nil
+
 	slices.SortFunc(filteredTools, func(a, b fantasy.AgentTool) int {
 		return strings.Compare(a.Info().Name, b.Info().Name)
 	})
 
-	// Wrap tools with hook interception for the top-level agent only.
-	// Sub-agents (the `agent` task tool, `agentic_fetch`, etc.) run
-	// without hook interception to avoid firing the user's hook N times
-	// per delegated turn. The top-level invocation of the sub-agent tool
-	// itself is still wrapped from the coder's side.
+	// Ordinary tools remain subject to top-level PreToolUse policy. Recovery
+	// is infrastructure: visible refs must remain resolvable, so it bypasses
+	// deny and rewrite hooks and is audited separately without content.
 	filteredTools = wrapToolsWithHooks(filteredTools, hookRunner, isSubAgent)
+	if registerRecovery {
+		var err error
+		filteredTools, err = appendContextRecoveryTool(filteredTools, tools.NewContextTreeQueryTool(contextModule), agent.Name)
+		if err != nil {
+			return nil, err
+		}
+	}
+	slices.SortFunc(filteredTools, func(a, b fantasy.AgentTool) int {
+		return strings.Compare(a.Info().Name, b.Info().Name)
+	})
 
 	return filteredTools, nil
 }
 
+func appendContextRecoveryTool(ordinary []fantasy.AgentTool, recovery fantasy.AgentTool, agentName string) ([]fantasy.AgentTool, error) {
+	for _, tool := range ordinary {
+		if tool.Info().Name != tools.ContextTreeQueryToolName {
+			continue
+		}
+		slog.Error("Reserved context recovery tool name collision",
+			"tool", tools.ContextTreeQueryToolName,
+			"agent", agentName,
+		)
+		return nil, fmt.Errorf("tool name %q is reserved for context projection recovery", tools.ContextTreeQueryToolName)
+	}
+	return append(ordinary, newRecoveryAuditTool(recovery)), nil
+}
+
 // buildAgentModels builds the selected primary model and the Small model
 // used by SessionAgent for title generation.
+type providerBuildOptions struct {
+	isSubAgent       bool
+	allowBodyLogging bool
+}
+
 func (c *coordinator) buildAgentModels(ctx context.Context, primaryModelType config.SelectedModelType, isSubAgent bool) (Model, Model, error) {
 	if primaryModelType == "" {
 		primaryModelType = config.SelectedModelTypeLarge
@@ -1016,11 +1144,17 @@ func (c *coordinator) buildAgentModels(ctx context.Context, primaryModelType con
 		return Model{}, Model{}, fmt.Errorf("invalid primary model type %q", primaryModelType)
 	}
 
-	primary, err := c.buildModel(ctx, primaryModelType, isSubAgent)
+	primary, err := c.buildModel(ctx, primaryModelType, providerBuildOptions{
+		isSubAgent:       isSubAgent,
+		allowBodyLogging: true,
+	})
 	if err != nil {
 		return Model{}, Model{}, err
 	}
-	secondary, err := c.buildModel(ctx, config.SelectedModelTypeSmall, true)
+	secondary, err := c.buildModel(ctx, config.SelectedModelTypeSmall, providerBuildOptions{
+		isSubAgent:       true,
+		allowBodyLogging: true,
+	})
 	if err != nil {
 		return Model{}, Model{}, err
 	}
@@ -1028,7 +1162,14 @@ func (c *coordinator) buildAgentModels(ctx context.Context, primaryModelType con
 	return primary, secondary, nil
 }
 
-func (c *coordinator) buildModel(ctx context.Context, modelType config.SelectedModelType, isSubAgent bool) (Model, error) {
+func (c *coordinator) buildCondenseModel(ctx context.Context, modelType config.SelectedModelType) (Model, error) {
+	return c.buildModel(ctx, modelType, providerBuildOptions{
+		isSubAgent:       false,
+		allowBodyLogging: false,
+	})
+}
+
+func (c *coordinator) buildModel(ctx context.Context, modelType config.SelectedModelType, buildOpts providerBuildOptions) (Model, error) {
 	modelCfg, ok := c.cfg.Config().Models[modelType]
 	if !ok {
 		return Model{}, fmt.Errorf("%s model not selected", modelType)
@@ -1038,7 +1179,7 @@ func (c *coordinator) buildModel(ctx context.Context, modelType config.SelectedM
 	if !ok {
 		return Model{}, fmt.Errorf("%s model provider not configured", modelType)
 	}
-	provider, err := c.buildProvider(providerCfg, modelCfg, isSubAgent)
+	provider, err := c.buildProvider(providerCfg, modelCfg, buildOpts)
 	if err != nil {
 		return Model{}, err
 	}
@@ -1049,7 +1190,7 @@ func (c *coordinator) buildModel(ctx context.Context, modelType config.SelectedM
 	}
 
 	modelID := modelCfg.Model
-	if modelCfg.Provider == openrouter.Name && isExactoSupported(modelID) {
+	if modelCfg.Provider == openrouter.Name && buildOpts.isSubAgent && isExactoSupported(modelID) {
 		modelID += ":exacto"
 	}
 	languageModel, err := provider.LanguageModel(ctx, modelID)
@@ -1060,10 +1201,11 @@ func (c *coordinator) buildModel(ctx context.Context, modelType config.SelectedM
 	// Bound each request with the configured timeout so unreachable or hung
 	// providers fail instead of blocking a session forever. The wrapper is
 	// applied per request, so retries get a fresh budget each attempt.
-	languageModel = newRequestTimeoutModel(languageModel, c.cfg.Config().Options.GetRequestTimeout())
+	requestTimeout := c.cfg.Config().Options.GetRequestTimeout()
+	languageModel = newRequestTimeoutModel(languageModel, requestTimeout)
 
 	// Hyper completions no longer report the hypercredit balance, so wrap
-	// Hyper models to fetch it from /v1/credits on every request.
+	// the Hyper models to fetch it from /v1/credits on every request.
 	if modelCfg.Provider == hyper.Name {
 		languageModel = newHyperCreditsModel(languageModel, c.hyperAPIKey)
 	}
@@ -1083,7 +1225,7 @@ func (c *coordinator) hyperAPIKey() string {
 	return config.ResolveHyperAPIKey(c.cfg.Config())
 }
 
-func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map[string]string, providerID string) (fantasy.Provider, error) {
+func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map[string]string, providerID string, bodyLogging bool) (fantasy.Provider, error) {
 	var opts []anthropic.Option
 
 	switch {
@@ -1108,20 +1250,20 @@ func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map
 		opts = append(opts, anthropic.WithBaseURL(baseURL))
 	}
 
-	if c.cfg.Config().Options.Debug {
+	if bodyLogging {
 		httpClient := log.NewHTTPClient()
 		opts = append(opts, anthropic.WithHTTPClient(httpClient))
 	}
 	return anthropic.New(opts...)
 }
 
-func (c *coordinator) buildOpenaiProvider(baseURL, apiKey string, headers map[string]string, token *oauth.Token) (fantasy.Provider, error) {
+func (c *coordinator) buildOpenaiProvider(baseURL, apiKey string, headers map[string]string, token *oauth.Token, bodyLogging bool) (fantasy.Provider, error) {
 	opts := []openai.Option{
 		openai.WithAPIKey(apiKey),
 		openai.WithUseResponsesAPI(),
 	}
 	var httpClient *http.Client
-	if c.cfg.Config().Options.Debug {
+	if bodyLogging {
 		httpClient = log.NewHTTPClient()
 	}
 	if token != nil {
@@ -1164,11 +1306,11 @@ func isChatGPTCodexBackend(baseURL string) bool {
 	return strings.Contains(baseURL, "chatgpt.com/backend-api/codex")
 }
 
-func (c *coordinator) buildOpenrouterProvider(_, apiKey string, headers map[string]string) (fantasy.Provider, error) {
+func (c *coordinator) buildOpenrouterProvider(_, apiKey string, headers map[string]string, bodyLogging bool) (fantasy.Provider, error) {
 	opts := []openrouter.Option{
 		openrouter.WithAPIKey(apiKey),
 	}
-	if c.cfg.Config().Options.Debug {
+	if bodyLogging {
 		httpClient := log.NewHTTPClient()
 		opts = append(opts, openrouter.WithHTTPClient(httpClient))
 	}
@@ -1178,11 +1320,11 @@ func (c *coordinator) buildOpenrouterProvider(_, apiKey string, headers map[stri
 	return openrouter.New(opts...)
 }
 
-func (c *coordinator) buildVercelProvider(_, apiKey string, headers map[string]string) (fantasy.Provider, error) {
+func (c *coordinator) buildVercelProvider(_, apiKey string, headers map[string]string, bodyLogging bool) (fantasy.Provider, error) {
 	opts := []vercel.Option{
 		vercel.WithAPIKey(apiKey),
 	}
-	if c.cfg.Config().Options.Debug {
+	if bodyLogging {
 		httpClient := log.NewHTTPClient()
 		opts = append(opts, vercel.WithHTTPClient(httpClient))
 	}
@@ -1192,7 +1334,7 @@ func (c *coordinator) buildVercelProvider(_, apiKey string, headers map[string]s
 	return vercel.New(opts...)
 }
 
-func (c *coordinator) buildOpenaiCompatProvider(baseURL, apiKey string, headers map[string]string, extraBody map[string]any, providerID string, isSubAgent bool) (fantasy.Provider, error) {
+func (c *coordinator) buildOpenaiCompatProvider(baseURL, apiKey string, headers map[string]string, extraBody map[string]any, providerID string, buildOpts providerBuildOptions) (fantasy.Provider, error) {
 	opts := []openaicompat.Option{
 		openaicompat.WithBaseURL(baseURL),
 		openaicompat.WithAPIKey(apiKey),
@@ -1209,7 +1351,7 @@ func (c *coordinator) buildOpenaiCompatProvider(baseURL, apiKey string, headers 
 				return copilotResponsesModels[modelID]
 			}),
 		)
-		httpClient = copilot.NewClient(isSubAgent, c.cfg.Config().Options.Debug)
+		httpClient = copilot.NewClient(buildOpts.isSubAgent, buildOpts.allowBodyLogging && c.cfg.Config().Options.Debug)
 
 	case string(catwalk.InferenceProviderOpenCodeGo), string(catwalk.InferenceProviderOpenCodeZen):
 		opts = append(
@@ -1228,7 +1370,7 @@ func (c *coordinator) buildOpenaiCompatProvider(baseURL, apiKey string, headers 
 			),
 		)
 	}
-	if httpClient == nil && c.cfg.Config().Options.Debug {
+	if httpClient == nil && buildOpts.allowBodyLogging && c.cfg.Config().Options.Debug {
 		httpClient = log.NewHTTPClient()
 	}
 	if httpClient != nil {
@@ -1246,13 +1388,13 @@ func (c *coordinator) buildOpenaiCompatProvider(baseURL, apiKey string, headers 
 	return openaicompat.New(opts...)
 }
 
-func (c *coordinator) buildAzureProvider(baseURL, apiKey string, headers map[string]string, options map[string]string) (fantasy.Provider, error) {
+func (c *coordinator) buildAzureProvider(baseURL, apiKey string, headers map[string]string, options map[string]string, bodyLogging bool) (fantasy.Provider, error) {
 	opts := []azure.Option{
 		azure.WithBaseURL(baseURL),
 		azure.WithAPIKey(apiKey),
 		azure.WithUseResponsesAPI(),
 	}
-	if c.cfg.Config().Options.Debug {
+	if bodyLogging {
 		httpClient := log.NewHTTPClient()
 		opts = append(opts, azure.WithHTTPClient(httpClient))
 	}
@@ -1269,9 +1411,9 @@ func (c *coordinator) buildAzureProvider(baseURL, apiKey string, headers map[str
 	return azure.New(opts...)
 }
 
-func (c *coordinator) buildBedrockProvider(apiKey string, headers map[string]string, providerID string) (fantasy.Provider, error) {
+func (c *coordinator) buildBedrockProvider(apiKey string, headers map[string]string, providerID string, bodyLogging bool) (fantasy.Provider, error) {
 	var opts []bedrock.Option
-	if c.cfg.Config().Options.Debug {
+	if bodyLogging {
 		httpClient := log.NewHTTPClient()
 		opts = append(opts, bedrock.WithHTTPClient(httpClient))
 	}
@@ -1298,12 +1440,12 @@ func (c *coordinator) buildBedrockProvider(apiKey string, headers map[string]str
 	return bedrock.New(opts...)
 }
 
-func (c *coordinator) buildGoogleProvider(baseURL, apiKey string, headers map[string]string) (fantasy.Provider, error) {
+func (c *coordinator) buildGoogleProvider(baseURL, apiKey string, headers map[string]string, bodyLogging bool) (fantasy.Provider, error) {
 	opts := []google.Option{
 		google.WithBaseURL(baseURL),
 		google.WithGeminiAPIKey(apiKey),
 	}
-	if c.cfg.Config().Options.Debug {
+	if bodyLogging {
 		httpClient := log.NewHTTPClient()
 		opts = append(opts, google.WithHTTPClient(httpClient))
 	}
@@ -1313,9 +1455,9 @@ func (c *coordinator) buildGoogleProvider(baseURL, apiKey string, headers map[st
 	return google.New(opts...)
 }
 
-func (c *coordinator) buildGoogleVertexProvider(headers map[string]string, options map[string]string) (fantasy.Provider, error) {
+func (c *coordinator) buildGoogleVertexProvider(headers map[string]string, options map[string]string, bodyLogging bool) (fantasy.Provider, error) {
 	opts := []google.Option{}
-	if c.cfg.Config().Options.Debug {
+	if bodyLogging {
 		httpClient := log.NewHTTPClient()
 		opts = append(opts, google.WithHTTPClient(httpClient))
 	}
@@ -1339,7 +1481,8 @@ func (c *coordinator) isAnthropicThinking(model config.SelectedModel) bool {
 	return err == nil && opts.Thinking != nil
 }
 
-func (c *coordinator) buildProvider(providerCfg config.ProviderConfig, model config.SelectedModel, isSubAgent bool) (fantasy.Provider, error) {
+func (c *coordinator) buildProvider(providerCfg config.ProviderConfig, model config.SelectedModel, buildOpts providerBuildOptions) (fantasy.Provider, error) {
+	bodyLogging := buildOpts.allowBodyLogging && c.cfg.Config().Options.Debug
 	headers := maps.Clone(providerCfg.ExtraHeaders)
 	if headers == nil {
 		headers = make(map[string]string)
@@ -1361,7 +1504,7 @@ func (c *coordinator) buildProvider(providerCfg config.ProviderConfig, model con
 	case string(catwalk.InferenceProviderOpenCodeGo), string(catwalk.InferenceProviderOpenCodeZen):
 		if isOpenCodeMessagesModel(providerCfg.ID, model.Model) {
 			baseURL = strings.TrimSuffix(baseURL, "/v1")
-			return c.buildAnthropicProvider(baseURL, apiKey, headers, providerCfg.ID)
+			return c.buildAnthropicProvider(baseURL, apiKey, headers, providerCfg.ID, bodyLogging)
 		}
 	}
 
@@ -1378,21 +1521,21 @@ func (c *coordinator) buildProvider(providerCfg config.ProviderConfig, model con
 				headers["chatgpt-account-id"] = token.AccountID
 			}
 		}
-		return c.buildOpenaiProvider(baseURL, apiKey, headers, token)
+		return c.buildOpenaiProvider(baseURL, apiKey, headers, token, bodyLogging)
 	case anthropic.Name:
-		return c.buildAnthropicProvider(baseURL, apiKey, headers, providerCfg.ID)
+		return c.buildAnthropicProvider(baseURL, apiKey, headers, providerCfg.ID, bodyLogging)
 	case openrouter.Name:
-		return c.buildOpenrouterProvider(baseURL, apiKey, headers)
+		return c.buildOpenrouterProvider(baseURL, apiKey, headers, bodyLogging)
 	case vercel.Name:
-		return c.buildVercelProvider(baseURL, apiKey, headers)
+		return c.buildVercelProvider(baseURL, apiKey, headers, bodyLogging)
 	case azure.Name:
-		return c.buildAzureProvider(baseURL, apiKey, headers, providerCfg.ExtraParams)
+		return c.buildAzureProvider(baseURL, apiKey, headers, providerCfg.ExtraParams, bodyLogging)
 	case bedrock.Name:
-		return c.buildBedrockProvider(apiKey, headers, providerCfg.ID)
+		return c.buildBedrockProvider(apiKey, headers, providerCfg.ID, bodyLogging)
 	case google.Name:
-		return c.buildGoogleProvider(baseURL, apiKey, headers)
+		return c.buildGoogleProvider(baseURL, apiKey, headers, bodyLogging)
 	case "google-vertex":
-		return c.buildGoogleVertexProvider(headers, providerCfg.ExtraParams)
+		return c.buildGoogleVertexProvider(headers, providerCfg.ExtraParams, bodyLogging)
 	case openaicompat.Name, hyper.Name:
 		switch providerCfg.ID {
 		case hyper.Name:
@@ -1404,12 +1547,12 @@ func (c *coordinator) buildProvider(providerCfg config.ProviderConfig, model con
 			}
 			providerCfg.ExtraBody["tool_stream"] = true
 		}
-		return c.buildOpenaiCompatProvider(baseURL, apiKey, headers, providerCfg.ExtraBody, providerCfg.ID, isSubAgent)
+		return c.buildOpenaiCompatProvider(baseURL, apiKey, headers, providerCfg.ExtraBody, providerCfg.ID, buildOpts)
 	default:
 		// Known custom providers (litellm, llamacpp, lmstudio, ollama,
 		// omlx) are openai-compat under the hood.
 		if discover.IsKnownCustomProvider(string(providerCfg.Type)) {
-			return c.buildOpenaiCompatProvider(baseURL, apiKey, headers, providerCfg.ExtraBody, providerCfg.ID, isSubAgent)
+			return c.buildOpenaiCompatProvider(baseURL, apiKey, headers, providerCfg.ExtraBody, providerCfg.ID, buildOpts)
 		}
 		return nil, fmt.Errorf("provider type not supported: %q", providerCfg.Type)
 	}
@@ -1485,7 +1628,53 @@ func (c *coordinator) updateAgentModels(ctx context.Context, agent SessionAgent,
 	}
 	agent.SetModels(large, small)
 
-	agentCfg, ok := c.cfg.Config().Agents[name]
+	cfg := c.cfg.Config()
+	projection := cfg.Options.ContextProjection
+	c.contextMu.Lock()
+	hasContextModule := c.contextModule != nil
+	c.contextMu.Unlock()
+	if hasContextModule && projection == nil {
+		return errors.New("context projection options are unavailable")
+	}
+	var selected Model
+	if hasContextModule && projection.Enabled {
+		selected, err = c.buildCondenseModel(ctx, projection.SummarizerModel)
+		if err != nil {
+			return fmt.Errorf("build context projection summarizer model: %w", err)
+		}
+	}
+	c.contextMu.Lock()
+	if c.contextModule != nil {
+		if !projection.Enabled {
+			options := condense.Options{
+				Enabled: false, MinBatchChars: projection.GetMinBatchChars(),
+				KeepRecentBatches: projection.GetKeepRecentBatches(), SummarizerTimeout: projection.SummarizerTimeout,
+			}
+			c.contextSummarizer = nil
+			c.contextModule.UpdateConfiguration(nil, options)
+		} else {
+			providerCfg, ok := cfg.Providers.Get(selected.ModelCfg.Provider)
+			if !ok {
+				c.contextMu.Unlock()
+				return fmt.Errorf("context projection summarizer provider %q not configured", selected.ModelCfg.Provider)
+			}
+			options, err := c.contextProjectionOptions(*projection, selected, providerCfg)
+			if err != nil {
+				c.contextMu.Unlock()
+				return err
+			}
+			updatedSummarizer := newFantasyCondenseSummarizer(
+				selected,
+				getProviderOptions(selected, providerCfg),
+				projection.SummarizerTimeout,
+			)
+			c.contextSummarizer = updatedSummarizer
+			c.contextModule.UpdateConfiguration(updatedSummarizer, options)
+		}
+	}
+	c.contextMu.Unlock()
+
+	agentCfg, ok := cfg.Agents[name]
 	if !ok {
 		return fmt.Errorf("%w: %s", errMainAgentNotFound, name)
 	}
@@ -1499,9 +1688,6 @@ func (c *coordinator) updateAgentModels(ctx context.Context, agent SessionAgent,
 }
 
 func (c *coordinator) ReloadSkills(ctx context.Context) error {
-	c.skillReloadMu.Lock()
-	defer c.skillReloadMu.Unlock()
-
 	if c.skillsMgr == nil {
 		return errors.New("skill reload requires a skills manager")
 	}
@@ -1527,6 +1713,7 @@ func (c *coordinator) ReloadSkills(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+
 	p, err := coderPrompt(
 		prompt.WithWorkingDir(c.cfg.WorkingDir()),
 		prompt.WithSkills(activeSkills),
@@ -1543,19 +1730,20 @@ func (c *coordinator) ReloadSkills(ctx context.Context) error {
 	if !ok {
 		return errCoderAgentNotConfigured
 	}
-
 	tools, err := c.buildTools(ctx, agentCfg, false)
 	if err != nil {
 		return err
 	}
 
+	// All builds succeeded — commit the new skill state, then apply the
+	// new prompt and tools (which capture the slices by value at
+	// construction time).
 	c.allSkills = allSkills
 	c.activeSkills = activeSkills
 	c.skillTracker = skills.NewTracker(activeSkills)
-	coderAgent := c.agents[config.AgentCoder]
-	coderAgent.SetSystemPrompt(systemPrompt)
-	coderAgent.SetTools(tools)
 	logPromptSkillStats(activeSkills)
+	c.currentAgent().SetSystemPrompt(systemPrompt)
+	c.currentAgent().SetTools(tools)
 	return nil
 }
 
@@ -1846,34 +2034,6 @@ func (c *coordinator) updateParentSessionCost(ctx context.Context, childSessionI
 	return nil
 }
 
-// discoverSkills is a thin fallback wrapper used only when no
-// skills.Manager has been threaded through to the coordinator. All
-// production call sites (backend.CreateWorkspace, setupLocalWorkspace)
-// run discovery in advance and pass the results via the manager;
-// reaching this path means a caller bypassed both. It deliberately does
-// NOT publish to the package-level broker — there are no subscribers in
-// that case, so doing so would be misleading without delivering the
-// snapshot anywhere useful.
-func discoverSkills(cfg *config.ConfigStore) (allSkills, activeSkills []*skills.Skill) {
-	opts := cfg.Config().Options
-	var paths, disabled []string
-	if opts != nil {
-		paths = opts.SkillsPaths
-		disabled = opts.DisabledSkills
-	}
-	var resolver func(string) (string, error)
-	if r := cfg.Resolver(); r != nil {
-		resolver = r.ResolveValue
-	}
-	allSkills, activeSkills, states := skills.DiscoverFromConfig(skills.DiscoveryConfig{
-		SkillsPaths:    paths,
-		DisabledSkills: disabled,
-		Resolver:       resolver,
-	})
-	logDiscoveryStats(states, paths, allSkills, activeSkills, disabled)
-	return allSkills, activeSkills
-}
-
 // logTurnSkillUsage emits a per-turn diagnostic line showing which skills
 // (if any) were loaded during this turn and which looked relevant based on
 // a cheap keyword match against the user prompt. The goal is to surface
@@ -1916,61 +2076,14 @@ func logTurnSkillUsage(
 	)
 }
 
-// logDiscoveryStats emits a single structured log line summarising skill
-// discovery for the current session. It is intentionally low-volume: one
-// line per session start. Builtin vs user counts are derived from the
-// SkillState.Path — builtin states use the "builtin/" embed prefix.
-func logDiscoveryStats(
-	states []*skills.SkillState,
-	userPaths []string,
-	allSkills, activeSkills []*skills.Skill,
-	disabled []string,
-) {
-	var builtinOK, builtinErr, userOK, userErr int
-	for _, s := range states {
-		isBuiltin := strings.HasPrefix(s.Path, "builtin/")
-		switch {
-		case isBuiltin && s.State == skills.StateNormal:
-			builtinOK++
-		case isBuiltin && s.State == skills.StateError:
-			builtinErr++
-		case !isBuiltin && s.State == skills.StateNormal:
-			userOK++
-		case !isBuiltin && s.State == skills.StateError:
-			userErr++
-		}
-	}
-
-	activeNames := make([]string, 0, len(activeSkills))
-	for _, s := range activeSkills {
-		activeNames = append(activeNames, s.Name)
-	}
-
-	xml := skills.ToPromptXML(activeSkills)
-
-	slog.Info(
-		"Skill discovery complete",
-		"component", "skills",
-		"builtin_ok", builtinOK,
-		"builtin_errors", builtinErr,
-		"user_ok", userOK,
-		"user_errors", userErr,
-		"user_paths", len(userPaths),
-		"deduped_total", len(allSkills),
-		"active", len(activeSkills),
-		"disabled", len(disabled),
-		"prompt_bytes", len(xml),
-		"prompt_tok_est", skills.ApproxTokenCount(xml),
-		"active_names", activeNames,
-	)
-}
-
-// logPromptSkillStats logs the prompt-injection size of the active skills XML.
+// logPromptSkillStats logs the prompt-injection size of the active
+// skills XML — the only discovery metric that is coordinator-specific
+// (depends on the active set AND the XML encoder).
 func logPromptSkillStats(activeSkills []*skills.Skill) {
 	xml := skills.ToPromptXML(activeSkills)
 	activeNames := make([]string, len(activeSkills))
-	for i, skill := range activeSkills {
-		activeNames[i] = skill.Name
+	for i, s := range activeSkills {
+		activeNames[i] = s.Name
 	}
 	slog.Info("Skill prompt stats",
 		"component", "skills",

@@ -70,6 +70,7 @@ type Stats struct {
 	AvgResponseTimeMs float64            `json:"avg_response_time_ms"`
 	ToolUsage         []ToolUsage        `json:"tool_usage"`
 	HourDayHeatmap    []HourDayHeatmapPt `json:"hour_day_heatmap"`
+	Projection        ProjectionStats    `json:"projection"`
 }
 
 type TotalStats struct {
@@ -121,6 +122,15 @@ type DailyActivity struct {
 type ToolUsage struct {
 	ToolName  string `json:"tool_name"`
 	CallCount int64  `json:"call_count"`
+}
+
+// ProjectionStats summarizes context projection savings across active
+// projection batches.
+type ProjectionStats struct {
+	ProjectedBatches int64 `json:"projected_batches"`
+	RawChars         int64 `json:"raw_chars"`
+	ProjectedChars   int64 `json:"projected_chars"`
+	CharsSaved       int64 `json:"chars_saved"`
 }
 
 type HourDayHeatmapPt struct {
@@ -416,6 +426,10 @@ func mergeStats(projectStats []ProjectStats) *Stats {
 		merged.Total.TotalTokens += s.Total.TotalTokens
 		merged.Total.TotalCost += s.Total.TotalCost
 		merged.Total.TotalMessages += s.Total.TotalMessages
+		merged.Projection.ProjectedBatches += s.Projection.ProjectedBatches
+		merged.Projection.RawChars += s.Projection.RawChars
+		merged.Projection.ProjectedChars += s.Projection.ProjectedChars
+		merged.Projection.CharsSaved += s.Projection.CharsSaved
 
 		// Aggregate daily usage.
 		for _, d := range s.UsageByDay {
@@ -632,6 +646,23 @@ func gatherStats(ctx context.Context, conn *sql.DB) (*Stats, error) {
 			Cost:         r.Cost.Float64,
 		})
 	}
+
+	// Context projection savings. Older read-only databases crawled for
+	// aggregated reports predate the projection tables; treat them as
+	// zero savings rather than failing the whole report.
+	projection, err := queries.GetProjectionStats(ctx)
+	if err != nil {
+		if !strings.Contains(err.Error(), "no such table") {
+			return nil, fmt.Errorf("get projection stats: %w", err)
+		}
+		projection = db.GetProjectionStatsRow{}
+	}
+	stats.Projection = ProjectionStats{
+		ProjectedBatches: projection.ProjectedBatches,
+		RawChars:         toInt64(projection.RawChars),
+		ProjectedChars:   toInt64(projection.ProjectedChars),
+	}
+	stats.Projection.CharsSaved = max(0, stats.Projection.RawChars-stats.Projection.ProjectedChars)
 
 	// Average response time.
 	avgResp, err := queries.GetAverageResponseTime(ctx)

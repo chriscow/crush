@@ -465,8 +465,9 @@ Usage:
   option [command]
 
 Available Commands:
-  reset     Clear every value from a list option
-  ui        Configure terminal UI behavior
+  context-projection  Configure recoverable historical context projection
+  reset               Clear every value from a list option
+  ui                  Configure terminal UI behavior
 
 Boolean Keys:
   debug                          enable debug logging
@@ -508,6 +509,39 @@ option skill-path ./skills
 option subagent-model small
 option attribution-trailer-style assisted-by
 ```
+
+#### `option context-projection`
+
+Configure recoverable projection of completed historical tool batches. Context
+projection is disabled by default. When enabled, Crush summarizes older tool
+results before sending them to the model while retaining the canonical results
+for exact recovery. The three newest completed batches remain verbatim by
+default.
+
+```text
+Usage:
+  option context-projection <key> <value>
+
+Available Keys:
+  enabled bool                 enable context projection (default: false)
+  min-batch-chars int          minimum result characters to project (default: 1000)
+  keep-recent-batches int      newest completed batches kept verbatim (default: 3)
+  summarizer-model string      configured model type: large or small (default: small)
+  summarizer-timeout duration  summary request timeout, greater than 0 and at most 1h
+                               (default: 2m)
+```
+
+```bash
+option context-projection enabled true
+option context-projection min-batch-chars 1000
+option context-projection keep-recent-batches 3
+option context-projection summarizer-model small
+option context-projection summarizer-timeout 2m
+```
+
+Set either integer field to `0` explicitly to disable that threshold or recent
+batch window. Enabling projection requires the selected `large` or `small`
+model to be configured and available.
 
 #### `option reset`
 
@@ -605,12 +639,23 @@ to Bash-based config.
   },
   "models": {
     "large": { "provider": "anthropic", "model": "claude-sonnet-4-20250514" },
+    "small": { "provider": "anthropic", "model": "claude-haiku-3-20250307" },
+  },
+  "options": {
+    "context_projection": {
+      "enabled": true,
+      "min_batch_chars": 1000,
+      "keep_recent_batches": 3,
+      "summarizer_model": "small",
+      "summarizer_timeout": 120000000000,
+    },
   },
   "permissions": { "allowed_tools": ["view", "ls", "grep"] },
 }
 ```
 
-For a full reference, See the [JSON schema](../../schema.json).
+JSON durations use nanoseconds, so `120000000000` is two minutes. For a full
+reference, see the [JSON schema](../../schema.json).
 
 In JSON, only selected string fields (API keys, URLs, MCP/LSP commands and args,
 headers) are shell-expanded at load time. In `crushrc` there's no such list —

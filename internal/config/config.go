@@ -63,6 +63,13 @@ const (
 	AgentTask  string = "task"
 )
 
+const (
+	defaultContextProjectionMinBatchChars     = 1_000
+	defaultContextProjectionKeepRecentBatches = 3
+	defaultContextProjectionSummarizerTimeout = 2 * time.Minute
+	maxContextProjectionSummarizerTimeout     = time.Hour
+)
+
 type SelectedModel struct {
 	// The model id as used by the provider API.
 	// Required.
@@ -450,14 +457,31 @@ func (Attribution) JSONSchemaExtend(schema *jsonschema.Schema) {
 	}
 }
 
+type ContextProjectionOptions struct {
+	Enabled           bool              `json:"enabled,omitempty" jsonschema:"description=Enable recoverable projection of historical tool results,default=false"`
+	MinBatchChars     *int              `json:"min_batch_chars,omitempty" jsonschema:"description=Minimum tool-result characters required before projection,minimum=0,default=1000"`
+	KeepRecentBatches *int              `json:"keep_recent_batches,omitempty" jsonschema:"description=Number of newest completed tool batches to keep verbatim,minimum=0,default=3"`
+	SummarizerModel   SelectedModelType `json:"summarizer_model,omitempty" jsonschema:"description=Configured model type used to summarize projected context,enum=large,enum=small,default=small"`
+	SummarizerTimeout time.Duration     `json:"summarizer_timeout,omitempty" jsonschema:"description=Maximum time allowed for context projection summarization,minimum=1,maximum=3600000000000,default=120000000000,example=120000000000"`
+}
+
+func (o ContextProjectionOptions) GetMinBatchChars() int {
+	return ptrValOr(o.MinBatchChars, defaultContextProjectionMinBatchChars)
+}
+
+func (o ContextProjectionOptions) GetKeepRecentBatches() int {
+	return ptrValOr(o.KeepRecentBatches, defaultContextProjectionKeepRecentBatches)
+}
+
 type Options struct {
-	ContextPaths         []string    `json:"context_paths,omitempty" jsonschema:"description=Paths to files containing context information for the AI,example=.cursorrules,example=CRUSH.md"`
-	GlobalContextPaths   []string    `json:"global_context_paths,omitempty" jsonschema:"description=Paths to files containing global context information for the AI,default=~/.config/crush/CRUSH.md,default=~/.config/AGENTS.md"`
-	SkillsPaths          []string    `json:"skills_paths,omitempty" jsonschema:"description=Paths to directories containing Agent Skills (folders with SKILL.md files),example=~/.config/crush/skills,example=./skills"`
-	TUI                  *TUIOptions `json:"tui,omitempty" jsonschema:"description=Terminal user interface options"`
-	Debug                bool        `json:"debug,omitempty" jsonschema:"description=Enable debug logging,default=false"`
-	DebugLSP             bool        `json:"debug_lsp,omitempty" jsonschema:"description=Enable debug logging for LSP servers,default=false"`
-	DisableAutoSummarize bool        `json:"disable_auto_summarize,omitempty" jsonschema:"description=Disable automatic conversation summarization,default=false"`
+	ContextPaths         []string                  `json:"context_paths,omitempty" jsonschema:"description=Paths to files containing context information for the AI,example=.cursorrules,example=CRUSH.md"`
+	GlobalContextPaths   []string                  `json:"global_context_paths,omitempty" jsonschema:"description=Paths to files containing global context information for the AI,default=~/.config/crush/CRUSH.md,default=~/.config/AGENTS.md"`
+	SkillsPaths          []string                  `json:"skills_paths,omitempty" jsonschema:"description=Paths to directories containing Agent Skills (folders with SKILL.md files),example=~/.config/crush/skills,example=./skills"`
+	TUI                  *TUIOptions               `json:"tui,omitempty" jsonschema:"description=Terminal user interface options"`
+	ContextProjection    *ContextProjectionOptions `json:"context_projection,omitempty" jsonschema:"description=Recoverable projection options for historical tool results"`
+	Debug                bool                      `json:"debug,omitempty" jsonschema:"description=Enable debug logging,default=false"`
+	DebugLSP             bool                      `json:"debug_lsp,omitempty" jsonschema:"description=Enable debug logging for LSP servers,default=false"`
+	DisableAutoSummarize bool                      `json:"disable_auto_summarize,omitempty" jsonschema:"description=Disable automatic conversation summarization,default=false"`
 	// DataDirectory is where Crush keeps per-project state such as
 	// the SQLite database and workspace overrides. Relative paths are
 	// resolved against the working directory; absolute paths are used
@@ -879,6 +903,18 @@ func (c *Config) cloneForWrite() *Config {
 			tui := *c.Options.TUI
 			opts.TUI = &tui
 		}
+		if c.Options.ContextProjection != nil {
+			projection := *c.Options.ContextProjection
+			if projection.MinBatchChars != nil {
+				minBatchChars := *projection.MinBatchChars
+				projection.MinBatchChars = &minBatchChars
+			}
+			if projection.KeepRecentBatches != nil {
+				keepRecentBatches := *projection.KeepRecentBatches
+				projection.KeepRecentBatches = &keepRecentBatches
+			}
+			opts.ContextProjection = &projection
+		}
 		nc.Options = &opts
 	}
 	return &nc
@@ -1087,6 +1123,42 @@ func (c *Config) ValidateSubagentModel() error {
 	default:
 		return fmt.Errorf("subagent model must be large or small")
 	}
+}
+
+func (c *Config) ValidateContextProjection() error {
+	if c.Options == nil || c.Options.ContextProjection == nil {
+		return nil
+	}
+
+	opts := c.Options.ContextProjection
+	if opts.GetMinBatchChars() < 0 {
+		return fmt.Errorf("minimum batch characters must be non-negative")
+	}
+	if opts.GetKeepRecentBatches() < 0 {
+		return fmt.Errorf("recent batch count must be non-negative")
+	}
+	switch opts.SummarizerModel {
+	case SelectedModelTypeLarge, SelectedModelTypeSmall:
+	default:
+		return fmt.Errorf("summarizer model must be large or small")
+	}
+	if opts.SummarizerTimeout <= 0 || opts.SummarizerTimeout > maxContextProjectionSummarizerTimeout {
+		return fmt.Errorf("summarizer timeout must be greater than zero and no more than 1h")
+	}
+	return nil
+}
+
+func (c *Config) ValidateContextProjectionModel() error {
+	if c.Options == nil || c.Options.ContextProjection == nil || !c.Options.ContextProjection.Enabled {
+		return nil
+	}
+
+	modelType := c.Options.ContextProjection.SummarizerModel
+	model, ok := c.Models[modelType]
+	if !ok || model.Provider == "" || model.Model == "" || !c.IsModelAvailable(model.Provider, model.Model) {
+		return fmt.Errorf("enabled context projection summarizer model %q is not configured", modelType)
+	}
+	return nil
 }
 
 func (c *Config) SetupAgents() {

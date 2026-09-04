@@ -8,6 +8,77 @@ import (
 	"database/sql"
 )
 
+type ContextProjectionItem struct {
+	ID                string `json:"id"`
+	NodeID            string `json:"node_id"`
+	SessionID         string `json:"session_id"`
+	SourceMessageID   string `json:"source_message_id"`
+	SourcePartOrdinal int64  `json:"source_part_ordinal"`
+	ToolCallID        string `json:"tool_call_id"`
+	ToolName          string `json:"tool_name"`
+	Description       string `json:"description"`
+	RefNumber         int64  `json:"ref_number"`
+	SourceHash        string `json:"source_hash"`
+	Ordinal           int64  `json:"ordinal"`
+	AlgorithmVersion  int64  `json:"algorithm_version"`
+}
+
+type ContextProjectionNode struct {
+	ID                 string         `json:"id"`
+	SessionID          string         `json:"session_id"`
+	BatchKey           string         `json:"batch_key"`
+	SourceHash         string         `json:"source_hash"`
+	AlgorithmVersion   int64          `json:"algorithm_version"`
+	ConfigurationID    string         `json:"configuration_id"`
+	State              string         `json:"state"`
+	Summary            string         `json:"summary"`
+	FirstMessageID     string         `json:"first_message_id"`
+	LastMessageID      string         `json:"last_message_id"`
+	RawChars           int64          `json:"raw_chars"`
+	ProjectedChars     int64          `json:"projected_chars"`
+	LeaseExpiresAt     sql.NullInt64  `json:"lease_expires_at"`
+	ClaimToken         sql.NullString `json:"claim_token"`
+	AttemptCount       int64          `json:"attempt_count"`
+	RetryAfter         sql.NullInt64  `json:"retry_after"`
+	Failure            string         `json:"failure"`
+	SummarizerProvider string         `json:"summarizer_provider"`
+	SummarizerModel    string         `json:"summarizer_model"`
+	PromptTokens       int64          `json:"prompt_tokens"`
+	CompletionTokens   int64          `json:"completion_tokens"`
+	Cost               float64        `json:"cost"`
+	CreatedAt          int64          `json:"created_at"`
+	UpdatedAt          int64          `json:"updated_at"`
+}
+
+type ContextProjectionRefCounter struct {
+	Singleton     int64 `json:"singleton"`
+	NextRefNumber int64 `json:"next_ref_number"`
+}
+
+type ContextProjectionSource struct {
+	NodeID            string `json:"node_id"`
+	SessionID         string `json:"session_id"`
+	SourceMessageID   string `json:"source_message_id"`
+	SourcePartOrdinal int64  `json:"source_part_ordinal"`
+	PartKind          string `json:"part_kind"`
+	SourceHash        string `json:"source_hash"`
+	Ordinal           int64  `json:"ordinal"`
+}
+
+type ContextProjectionUsageAttempt struct {
+	NodeID             string  `json:"node_id"`
+	SessionID          string  `json:"session_id"`
+	AttemptNumber      int64   `json:"attempt_number"`
+	SummarizerProvider string  `json:"summarizer_provider"`
+	SummarizerModel    string  `json:"summarizer_model"`
+	PromptTokens       int64   `json:"prompt_tokens"`
+	CompletionTokens   int64   `json:"completion_tokens"`
+	Cost               float64 `json:"cost"`
+	Accounted          int64   `json:"accounted"`
+	CreatedAt          int64   `json:"created_at"`
+	UpdatedAt          int64   `json:"updated_at"`
+}
+
 type File struct {
 	ID        string `json:"id"`
 	SessionID string `json:"session_id"`

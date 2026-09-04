@@ -66,6 +66,28 @@ func (q *Queries) GetHourDayHeatmap(ctx context.Context) ([]GetHourDayHeatmapRow
 	return items, nil
 }
 
+const getProjectionStats = `-- name: GetProjectionStats :one
+SELECT
+    COUNT(*) as projected_batches,
+    COALESCE(SUM(raw_chars), 0) as raw_chars,
+    COALESCE(SUM(projected_chars), 0) as projected_chars
+FROM context_projection_nodes
+WHERE state = 'active'
+`
+
+type GetProjectionStatsRow struct {
+	ProjectedBatches int64       `json:"projected_batches"`
+	RawChars         interface{} `json:"raw_chars"`
+	ProjectedChars   interface{} `json:"projected_chars"`
+}
+
+func (q *Queries) GetProjectionStats(ctx context.Context) (GetProjectionStatsRow, error) {
+	row := q.queryRow(ctx, q.getProjectionStatsStmt, getProjectionStats)
+	var i GetProjectionStatsRow
+	err := row.Scan(&i.ProjectedBatches, &i.RawChars, &i.ProjectedChars)
+	return i, err
+}
+
 const getRecentActivity = `-- name: GetRecentActivity :many
 SELECT
     date(created_at, 'unixepoch') as day,

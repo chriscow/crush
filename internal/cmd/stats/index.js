@@ -89,6 +89,24 @@ document.getElementById("total-tokens").textContent = formatCompact(
 document.getElementById("total-cost").textContent = formatCost(
   stats.total.total_cost,
 );
+const projection = stats.projection || { projected_batches: 0, chars_saved: 0 };
+const projectionSaved = document.getElementById("projection-saved");
+if (projection.projected_batches > 0) {
+  projectionSaved.innerHTML =
+    '<span title="Context projection recovered ' +
+    formatNumber(projection.chars_saved) +
+    " characters across " +
+    formatNumber(projection.projected_batches) +
+    " projected batches (raw " +
+    formatNumber(projection.raw_chars) +
+    ", projected " +
+    formatNumber(projection.projected_chars) +
+    ')">' +
+    formatCompact(projection.chars_saved) +
+    "</span>";
+} else {
+  projectionSaved.textContent = "—";
+}
 document.getElementById("avg-tokens").innerHTML =
   '<span title="Average">x̅</span> ' +
   formatCompact(stats.total.avg_tokens_per_session);

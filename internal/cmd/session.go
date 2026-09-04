@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/condense"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/event"
@@ -140,13 +142,18 @@ func sessionSetup(cmd *cobra.Command) (context.Context, *sessionServices, func()
 		return nil, nil, nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
 
+	svc := newSessionServices(conn, cfg)
+	return ctx, svc, func() { conn.Close() }, nil
+}
+
+func newSessionServices(conn *sql.DB, cfg *config.ConfigStore) *sessionServices {
 	queries := db.New(conn)
-	svc := &sessionServices{
-		sessions: session.NewService(queries, conn),
-		messages: message.NewService(queries),
+	projectionStore := condense.NewStore(queries, conn)
+	return &sessionServices{
+		sessions: session.NewService(queries, conn, session.WithDeleteLifecycle(projectionStore)),
+		messages: message.NewService(queries, message.WithMessageDeleter(projectionStore)),
 		cfg:      cfg,
 	}
-	return ctx, svc, func() { conn.Close() }, nil
 }
 
 func runSessionList(cmd *cobra.Command, _ []string) error {
@@ -318,7 +325,7 @@ func runSessionDelete(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if err := svc.sessions.Delete(ctx, sess.ID); err != nil {
+	if err := deleteSession(ctx, svc, sess.ID); err != nil {
 		return fmt.Errorf("failed to delete session: %w", err)
 	}
 
@@ -335,6 +342,19 @@ func runSessionDelete(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Fprintf(out, "Deleted session %s\n", session.HashID(sess.ID)[:12])
+	return nil
+}
+
+func deleteSession(ctx context.Context, svc *sessionServices, sessionID string) error {
+	if err := svc.messages.PrepareSessionDelete(ctx, sessionID); err != nil {
+		return fmt.Errorf("prepare message deletion: %w", err)
+	}
+	deleted := false
+	defer func() { svc.messages.FinishSessionDelete(sessionID, deleted) }()
+	if err := svc.sessions.Delete(ctx, sessionID); err != nil {
+		return err
+	}
+	deleted = true
 	return nil
 }
 
@@ -388,9 +408,10 @@ func runSessionFork(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := svc.messages.FlushAll(ctx); err != nil {
-		return fmt.Errorf("failed to flush session messages: %w", err)
+	if err := svc.messages.PrepareSessionSnapshot(ctx, sess.ID); err != nil {
+		return fmt.Errorf("failed to prepare session snapshot: %w", err)
 	}
+	defer svc.messages.FinishSessionSnapshot(sess.ID)
 
 	forkedSess, err := svc.sessions.Fork(ctx, sess.ID)
 	if err != nil {
