@@ -459,6 +459,9 @@ permissions deny bash
 Configure general Crush behavior, paths, attribution, and the terminal UI.
 Boolean values are optional and default to `true`.
 
+`option` is a builtin of the `crushrc` config file, not a terminal command:
+these lines go inside a `crushrc` file (see the search paths table above).
+
 ```text
 Usage:
   option <key> [value]
@@ -537,6 +540,15 @@ option context-projection min-batch-chars 1000
 option context-projection keep-recent-batches 3
 option context-projection summarizer-model small
 option context-projection summarizer-timeout 2m
+```
+
+For example, enable it globally by adding the line to
+`~/.config/crush/crushrc`, or per project by adding it to `crushrc` in the
+project root:
+
+```bash
+# ~/.config/crush/crushrc or <project>/crushrc
+option context-projection enabled true
 ```
 
 Set either integer field to `0` explicitly to disable that threshold or recent
