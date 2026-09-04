@@ -118,3 +118,30 @@ func TestHashesChangeForSourceFields(t *testing.T) {
 		})
 	}
 }
+
+func TestSourcePartHashCoversAllContentParts(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		part message.ContentPart
+	}{
+		{name: "image url", part: message.ImageURLContent{URL: "https://example.test/i.png", Detail: "auto"}},
+		{name: "binary", part: message.BinaryContent{Path: "img.png", MIMEType: "image/png", Data: []byte{1, 2, 3}}},
+		{name: "shell command", part: message.ShellCommand{Command: "go test ./...", Output: "ok", ExitCode: 0}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			msg := message.Message{ID: "m", SessionID: "s", Role: message.User, Parts: []message.ContentPart{tt.part}}
+			original, err := sourcePartHash(msg, 0, tt.part)
+			require.NoError(t, err)
+
+			changed, err := sourcePartHash(msg, 0, tt.part)
+			require.NoError(t, err)
+			require.Equal(t, original, changed, "hashing the same part must be deterministic")
+		})
+	}
+}

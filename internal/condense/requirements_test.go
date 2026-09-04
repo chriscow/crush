@@ -250,3 +250,25 @@ func TestModuleUpdateOptionsIsConcurrentSafe(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestClaimToleratesBinaryAndShellPartsInCanonicalHistory(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnvironment(t, nil, enabledOptions())
+	attached, err := env.messages.Create(t.Context(), env.sessionID, message.CreateMessageParams{
+		Role: message.User, Parts: []message.ContentPart{
+			message.BinaryContent{Path: "shot.png", MIMEType: "image/png", Data: []byte{9, 9, 9}},
+			message.ShellCommand{Command: "go version", Output: "go1.26", ExitCode: 0},
+		},
+	})
+	require.NoError(t, err)
+	batch := env.createBatch(t, strings.Repeat("canonical", 300))
+	history := append([]message.Message{attached}, batch...)
+
+	_, ok, err := env.store.claimForHistory(
+		t.Context(), scanCandidates(history)[0], env.module.Options().ConfigurationID, history,
+		time.Unix(2_500, 0), time.Minute,
+	)
+	require.NoError(t, err, "parts outside tool batches must not break hashing")
+	require.True(t, ok)
+}

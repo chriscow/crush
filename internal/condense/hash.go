@@ -139,6 +139,20 @@ func encodePart(e *hashEncoder, ordinal int, part message.ContentPart) error {
 	case message.ToolResult:
 		e.field("part_type", "tool_result")
 		encodeToolResult(e, value)
+	case message.ImageURLContent:
+		e.field("part_type", "image_url")
+		e.field("url", value.URL)
+		e.field("detail", value.Detail)
+	case message.BinaryContent:
+		e.field("part_type", "binary")
+		e.field("path", value.Path)
+		e.field("mime_type", value.MIMEType)
+		e.bytes(value.Data)
+	case message.ShellCommand:
+		e.field("part_type", "shell_command")
+		e.field("command", value.Command)
+		e.field("output", value.Output)
+		e.integer("exit_code", int64(value.ExitCode))
 	case message.Finish:
 		e.field("part_type", "finish")
 		e.field("reason", string(value.Reason))
