@@ -3,11 +3,13 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
@@ -469,4 +471,23 @@ func TestCondenseSummaryProviderOptionsRequestsJSONMode(t *testing.T) {
 		require.Equal(t, options, condenseSummaryProviderOptions(options))
 		require.Equal(t, fantasy.ProviderOptions(nil), condenseSummaryProviderOptions(nil))
 	})
+}
+
+func TestParseCondenseSummaryBoundsOverlongTextInsteadOfRejecting(t *testing.T) {
+	t.Parallel()
+
+	summary := strings.Repeat("s", condenseSummaryMaxSummaryRunes+50)
+	description := strings.Repeat("d", condenseSummaryMaxItemRunes+50)
+	summaryJSON := fmt.Sprintf(`{"summary":%q,"items":[{"ordinal":0,"description":%q},{"ordinal":1,"description":%q}]}`,
+		summary, description, "valid")
+
+	parsed, err := parseCondenseSummary(summaryJSON, 2)
+	require.NoError(t, err)
+	require.Equal(t, condenseSummaryMaxSummaryRunes, utf8.RuneCountInString(parsed.Text))
+	require.Equal(t, condenseSummaryMaxItemRunes, utf8.RuneCountInString(parsed.Items[0].Description))
+	require.Equal(t, "valid", parsed.Items[1].Description, "bounded items are untouched")
+
+	emptyItems := `{"summary":"ok","items":[{"ordinal":0,"description":"  "},{"ordinal":1,"description":"x"}]}`
+	_, err = parseCondenseSummary(emptyItems, 2)
+	require.ErrorContains(t, err, "invalid item description")
 }

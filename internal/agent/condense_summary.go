@@ -284,12 +284,18 @@ func parseCondenseSummary(value string, itemCount int) (condense.Summary, error)
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
 		return condense.Summary{}, errors.New("summarizer response contains more than one JSON value")
 	}
-	if strings.TrimSpace(decoded.Summary) == "" || utf8.RuneCountInString(decoded.Summary) > condenseSummaryMaxSummaryRunes {
+	if strings.TrimSpace(decoded.Summary) == "" {
 		return condense.Summary{}, errors.New("summarizer response has an invalid summary")
 	}
 	if len(decoded.Items) != itemCount {
 		return condense.Summary{}, errors.New("summarizer response has an invalid item count")
 	}
+
+	// Over-length summary and description text is bounded, not rejected:
+	// the projection core truncates to the same limits (4000/500 runes), so
+	// refusing here would only push batches into retry backoff for text the
+	// core would have accepted.
+	decoded.Summary = truncateRunes(decoded.Summary, condenseSummaryMaxSummaryRunes)
 
 	items := make([]condense.SummaryItem, itemCount)
 	seen := make([]bool, itemCount)
@@ -297,13 +303,24 @@ func parseCondenseSummary(value string, itemCount int) (condense.Summary, error)
 		if item.Ordinal < 0 || item.Ordinal >= itemCount || seen[item.Ordinal] {
 			return condense.Summary{}, errors.New("summarizer response has a duplicate or unknown item ordinal")
 		}
-		if strings.TrimSpace(item.Description) == "" || utf8.RuneCountInString(item.Description) > condenseSummaryMaxItemRunes {
+		if strings.TrimSpace(item.Description) == "" {
 			return condense.Summary{}, errors.New("summarizer response has an invalid item description")
 		}
+		item.Description = truncateRunes(item.Description, condenseSummaryMaxItemRunes)
 		seen[item.Ordinal] = true
 		items[item.Ordinal] = condense.SummaryItem{Ordinal: item.Ordinal, Description: item.Description}
 	}
 	return condense.Summary{Text: decoded.Summary, Items: items}, nil
+}
+
+// truncateRunes bounds value to maxRunes Unicode code points without
+// splitting a multi-byte sequence.
+func truncateRunes(value string, maxRunes int) string {
+	if utf8.RuneCountInString(value) <= maxRunes {
+		return value
+	}
+	runes := []rune(value)
+	return string(runes[:maxRunes])
 }
 
 func classifyCondenseSummaryError(parent, callCtx context.Context, err error) error {
