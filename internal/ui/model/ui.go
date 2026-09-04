@@ -6146,8 +6146,11 @@ func (m *UI) drawSessionDetails(scr uv.Screen, area uv.Rectangle) {
 		title,
 		"",
 		m.modelInfo(width),
-		"",
 	}
+	if projection := m.projectionInfo(width); projection != "" {
+		blocks = append(blocks, projection)
+	}
+	blocks = append(blocks, "")
 
 	detailsHeader := lipgloss.JoinVertical(
 		lipgloss.Left,
