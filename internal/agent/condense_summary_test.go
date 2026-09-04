@@ -11,6 +11,7 @@ import (
 
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
+	"charm.land/fantasy/providers/openaicompat"
 	"charm.land/fantasy/providers/openrouter"
 	"github.com/charmbracelet/crush/internal/condense"
 	"github.com/charmbracelet/crush/internal/message"
@@ -439,4 +440,33 @@ func TestCondenseSummaryCost(t *testing.T) {
 		}},
 	}
 	require.InDelta(t, want, condenseSummaryCost(model, unrelatedMetadata), 1e-15)
+}
+
+func TestCondenseSummaryProviderOptionsRequestsJSONMode(t *testing.T) {
+	t.Parallel()
+
+	t.Run("injects response format for openai-compatible providers", func(t *testing.T) {
+		t.Parallel()
+
+		options := fantasy.ProviderOptions{
+			openaicompat.Name: &openaicompat.ProviderOptions{
+				ExtraBody: map[string]any{"enable_thinking": false},
+			},
+		}
+		merged := condenseSummaryProviderOptions(options)
+		parsed := merged[openaicompat.Name].(*openaicompat.ProviderOptions)
+		require.Equal(t, map[string]any{"type": "json_object"}, parsed.ExtraBody["response_format"])
+		require.Equal(t, false, parsed.ExtraBody["enable_thinking"], "existing extra body is preserved")
+
+		original := options[openaicompat.Name].(*openaicompat.ProviderOptions)
+		require.Nil(t, original.ExtraBody["response_format"], "the input options are not mutated")
+	})
+
+	t.Run("passes through providers without openai-compatible options", func(t *testing.T) {
+		t.Parallel()
+
+		options := fantasy.ProviderOptions{"other": &openaicompat.ProviderOptions{}}
+		require.Equal(t, options, condenseSummaryProviderOptions(options))
+		require.Equal(t, fantasy.ProviderOptions(nil), condenseSummaryProviderOptions(nil))
+	})
 }

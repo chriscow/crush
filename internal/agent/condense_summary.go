@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"charm.land/fantasy"
+	"charm.land/fantasy/providers/openaicompat"
 	"charm.land/fantasy/providers/openrouter"
 	"github.com/charmbracelet/crush/internal/condense"
 	"github.com/charmbracelet/crush/internal/csync"
@@ -61,9 +62,36 @@ type fantasyCondenseSummarizer struct {
 func newFantasyCondenseSummarizer(model Model, providerOptions fantasy.ProviderOptions, timeout time.Duration) *fantasyCondenseSummarizer {
 	return &fantasyCondenseSummarizer{
 		selected: csync.NewValue(condenseSummaryModel{
-			model: model, providerOptions: providerOptions, timeout: timeout,
+			model: model, providerOptions: condenseSummaryProviderOptions(providerOptions), timeout: timeout,
 		}),
 	}
+}
+
+// condenseSummaryProviderOptions requests JSON mode from OpenAI-compatible
+// providers so the summary arrives as one parseable JSON object instead of
+// prose wrapped around it. Providers without an openai-compat options entry
+// are passed through unchanged and rely on the prompt contract alone.
+func condenseSummaryProviderOptions(options fantasy.ProviderOptions) fantasy.ProviderOptions {
+	raw, ok := options[openaicompat.Name]
+	parsed, isParsed := raw.(*openaicompat.ProviderOptions)
+	if !ok || !isParsed || parsed == nil {
+		return options
+	}
+
+	merged := *parsed
+	extraBody := make(map[string]any, len(parsed.ExtraBody)+1)
+	for key, value := range parsed.ExtraBody {
+		extraBody[key] = value
+	}
+	extraBody["response_format"] = map[string]any{"type": "json_object"}
+	merged.ExtraBody = extraBody
+
+	mergedOptions := make(fantasy.ProviderOptions, len(options))
+	for key, value := range options {
+		mergedOptions[key] = value
+	}
+	mergedOptions[openaicompat.Name] = &merged
+	return mergedOptions
 }
 
 func (s *fantasyCondenseSummarizer) Summarize(ctx context.Context, candidate condense.Candidate) (condense.Summary, error) {
