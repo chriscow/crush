@@ -25,6 +25,7 @@ package model
 // Update, no model mutation inside commands).
 
 import (
+	"context"
 	"slices"
 	"time"
 
@@ -103,6 +104,14 @@ type agentRunSubmittedMsg struct{}
 // ready/model state should be re-fetched without waiting for the TTL.
 type agentModelChangedMsg struct{}
 
+// projectionStatsMsg delivers the context projection savings fetched
+// off-thread. forSession guards against a stale result racing a session
+// switch.
+type projectionStatsMsg struct {
+	forSession string
+	stats      workspace.AgentProjectionStats
+}
+
 // agentModelChangedCmd is sequenced after cmds that call UpdateAgentModel so
 // the refresh probes the coordinator only once the update has completed.
 // Callers should reach for updateAgentModelCmd rather than sequencing this
@@ -155,6 +164,23 @@ func (m *UI) dispatchBusyRefresh() tea.Cmd {
 		}
 		st.yolo = ws.PermissionSkipRequests()
 		return st
+	}
+}
+
+// dispatchProjectionRefresh fetches the current session's context projection
+// savings off-thread. The DB read is cheap (a single indexed query) but the
+// UI never touches services on the Update goroutine.
+func (m *UI) dispatchProjectionRefresh() tea.Cmd {
+	if m.com == nil || m.com.Workspace == nil || m.session == nil {
+		return nil
+	}
+	ws := m.com.Workspace
+	sessionID := m.session.ID
+	return func() tea.Msg {
+		return projectionStatsMsg{
+			forSession: sessionID,
+			stats:      ws.AgentSessionProjectionStats(context.Background(), sessionID),
+		}
 	}
 }
 

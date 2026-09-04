@@ -606,6 +606,25 @@ func (s *Store) active(ctx context.Context, sessionID string) ([]activeProjectio
 	return active, nil
 }
 
+// SessionStats summarizes projection savings across the session's active
+// batches. RawChars is the canonical characters replaced by ProjectedChars
+// of provider-facing copies.
+func (s *Store) SessionStats(ctx context.Context, sessionID string) (SessionStats, error) {
+	var stats SessionStats
+	nodes, err := s.q.ListActiveContextProjectionNodes(ctx, db.ListActiveContextProjectionNodesParams{
+		SessionID: sessionID, AlgorithmVersion: AlgorithmVersion,
+	})
+	if err != nil {
+		return stats, fmt.Errorf("list active nodes: %w", err)
+	}
+	stats.Batches = int64(len(nodes))
+	for _, node := range nodes {
+		stats.RawChars += node.RawChars
+		stats.ProjectedChars += node.ProjectedChars
+	}
+	return stats, nil
+}
+
 func (s *Store) staleActive(ctx context.Context, projection activeProjection, now time.Time) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

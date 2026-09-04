@@ -110,6 +110,10 @@ func (c *scriptedCoordinator) emitAssistant(sessionID, id string, reason message
 	})
 }
 
+func (r *scriptedCoordinator) SessionProjectionStats(ctx context.Context, sessionID string) agent.ProjectionStats {
+	return agent.ProjectionStats{}
+}
+
 func (c *scriptedCoordinator) Run(ctx context.Context, sessionID, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
 	c.runStarts.Add(1)
 	runCtx, cancel := context.WithCancel(ctx)

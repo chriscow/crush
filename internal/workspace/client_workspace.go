@@ -342,6 +342,13 @@ func (w *ClientWorkspace) AgentSummarize(ctx context.Context, sessionID string) 
 	return w.client.AgentSummarizeSession(ctx, w.workspaceID(), sessionID)
 }
 
+// AgentSessionProjectionStats reports zero savings in client/server mode:
+// projection aggregates are not part of the remote protocol yet, so the UI
+// hides the projection line instead of showing stale values.
+func (w *ClientWorkspace) AgentSessionProjectionStats(ctx context.Context, sessionID string) AgentProjectionStats {
+	return AgentProjectionStats{}
+}
+
 func (w *ClientWorkspace) UpdateAgentModel(ctx context.Context) error {
 	return w.client.UpdateAgent(ctx, w.workspaceID())
 }

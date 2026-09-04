@@ -64,6 +64,20 @@ func (m *Module) AccountUsage(ctx context.Context, sessionID string) error {
 	return m.store.AccountUsage(ctx, sessionID)
 }
 
+// SessionStats returns aggregate projection savings for the session's active
+// batches. Zero values mean nothing is currently projected, including when
+// projection is disabled or the store is unavailable.
+func (m *Module) SessionStats(ctx context.Context, sessionID string) SessionStats {
+	if m == nil || m.store == nil || !m.store.available() {
+		return SessionStats{}
+	}
+	stats, err := m.store.SessionStats(ctx, sessionID)
+	if err != nil {
+		return SessionStats{}
+	}
+	return stats
+}
+
 // Project returns provider-facing copies while preserving canonical input.
 func (m *Module) Project(ctx context.Context, sessionID string, messages []message.Message) ([]message.Message, error) {
 	summarizer, options := m.configuration()

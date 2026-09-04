@@ -111,6 +111,16 @@ type AgentModel struct {
 	ModelCfg   config.SelectedModel
 }
 
+// AgentProjectionStats summarizes context projection savings for a session
+// as exposed to the UI. Batches counts active projected batches, RawChars is
+// the canonical characters they replaced, and ProjectedChars is what the
+// provider-facing copies use. Zero values mean nothing is projected.
+type AgentProjectionStats struct {
+	Batches        int64 `json:"batches"`
+	RawChars       int64 `json:"raw_chars"`
+	ProjectedChars int64 `json:"projected_chars"`
+}
+
 // Workspace is the main abstraction consumed by the TUI and CLI. It
 // groups every operation a frontend needs to perform against a running
 // workspace, regardless of whether the workspace is in-process or
@@ -168,6 +178,9 @@ type Workspace interface {
 	AgentSetMain(agentID string) error
 	AgentListCronTasks(sessionID string) []scheduler.Task
 	AgentSummarize(ctx context.Context, sessionID string) error
+	// AgentSessionProjectionStats reports context projection savings for the
+	// session's active batches. Zero values mean nothing is projected.
+	AgentSessionProjectionStats(ctx context.Context, sessionID string) AgentProjectionStats
 	UpdateAgentModel(ctx context.Context) error
 	ReloadSkills(ctx context.Context) error
 	InitCoderAgent(ctx context.Context) error

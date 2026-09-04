@@ -143,6 +143,10 @@ type Coordinator interface {
 	UpdateModels(ctx context.Context) error
 	ReloadSkills(ctx context.Context) error
 	GenerateTitle(ctx context.Context, sessionID, prompt string)
+	// SessionProjectionStats reports aggregate projection savings for the
+	// session's active batches. Zero values mean nothing is projected,
+	// including when projection is disabled or unavailable.
+	SessionProjectionStats(ctx context.Context, sessionID string) ProjectionStats
 }
 
 type coordinator struct {
@@ -819,6 +823,23 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 	}
 
 	return options
+}
+
+// SessionProjectionStats reports aggregate projection savings for the
+// session's active batches. Zero values mean nothing is projected, including
+// when projection is disabled or not yet built.
+func (c *coordinator) SessionProjectionStats(ctx context.Context, sessionID string) ProjectionStats {
+	c.contextMu.Lock()
+	defer c.contextMu.Unlock()
+	if c.contextModule == nil {
+		return ProjectionStats{}
+	}
+	stats := c.contextModule.SessionStats(ctx, sessionID)
+	return ProjectionStats{
+		Batches:        stats.Batches,
+		RawChars:       stats.RawChars,
+		ProjectedChars: stats.ProjectedChars,
+	}
 }
 
 func (c *coordinator) contextProjectionOptions(projection config.ContextProjectionOptions, selected Model, provider config.ProviderConfig) (condense.Options, error) {

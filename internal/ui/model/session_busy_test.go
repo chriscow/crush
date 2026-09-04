@@ -38,6 +38,9 @@ type countingWorkspace struct {
 	lspStates map[string]workspace.LSPClientInfo
 	lspDiags  map[string]lsp.DiagnosticCounts
 
+	projectionCalls int
+	projectionStats workspace.AgentProjectionStats
+
 	readyCalls      int
 	agentBusyCalls  int
 	queuedCalls     int
@@ -49,6 +52,11 @@ type countingWorkspace struct {
 	modelCalls      int
 	lspStateCalls   int
 	lspDiagCalls    int
+}
+
+func (w *countingWorkspace) AgentSessionProjectionStats(ctx context.Context, sessionID string) workspace.AgentProjectionStats {
+	w.projectionCalls++
+	return w.projectionStats
 }
 
 func (w *countingWorkspace) AgentIsReady() bool { w.readyCalls++; return w.ready }

@@ -160,6 +160,15 @@ type Query struct {
 	Limit  *int
 }
 
+// SessionStats summarizes projection savings for one session's active
+// batches. Batches counts active nodes, RawChars is the canonical characters
+// they replaced, and ProjectedChars is what the provider-facing copies use.
+type SessionStats struct {
+	Batches        int64
+	RawChars       int64
+	ProjectedChars int64
+}
+
 // Result is an exact page from canonical persisted tool-result content.
 type Result struct {
 	Status     string

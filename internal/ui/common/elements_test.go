@@ -33,3 +33,22 @@ func TestFormatTokensAndCostOmitsEstimatedPrefix(t *testing.T) {
 	require.Contains(t, actual, "12%")
 	require.NotContains(t, actual, "~12%")
 }
+
+func TestFormatTokenCount(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		tokens int64
+		want   string
+	}{
+		{tokens: 0, want: "0"},
+		{tokens: 999, want: "999"},
+		{tokens: 1_000, want: "1K"},
+		{tokens: 12_400, want: "12.4K"},
+		{tokens: 1_000_000, want: "1M"},
+		{tokens: 2_500_000, want: "2.5M"},
+	}
+	for _, tt := range tests {
+		require.Equal(t, tt.want, FormatTokenCount(tt.tokens), "FormatTokenCount(%d)", tt.tokens)
+	}
+}

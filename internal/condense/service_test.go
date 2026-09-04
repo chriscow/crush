@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 )
@@ -144,4 +145,29 @@ func TestProjectLiveOldestClaimDoesNotProcessLaterCandidate(t *testing.T) {
 	require.Zero(t, summarizer.calls)
 	_, err = env.store.node(t.Context(), scanCandidates(second)[0])
 	require.Error(t, err)
+}
+
+func TestModuleSessionStats(t *testing.T) {
+	t.Parallel()
+
+	disabled := newTestEnvironment(t, nil, Options{Enabled: false})
+	require.Zero(t, disabled.module.SessionStats(t.Context(), disabled.sessionID).Batches)
+
+	env := newTestEnvironment(t, &fixedSummarizer{summary: Summary{Text: "summary"}}, enabledOptions())
+	stats := env.module.SessionStats(t.Context(), env.sessionID)
+	require.Zero(t, stats.Batches, "nothing is projected before activation")
+
+	canonical := env.createBatch(t, strings.Repeat("canonical", 300))
+	_, err := env.module.Project(t.Context(), env.sessionID, canonical)
+	require.NoError(t, err)
+
+	stats = env.module.SessionStats(t.Context(), env.sessionID)
+	require.Equal(t, int64(1), stats.Batches)
+	require.Equal(t, int64(utf8.RuneCountInString(canonical[1].ToolResults()[0].Content)), stats.RawChars)
+	require.Greater(t, stats.ProjectedChars, int64(0))
+	require.Less(t, stats.ProjectedChars, stats.RawChars)
+
+	other := newTestEnvironment(t, &fixedSummarizer{summary: Summary{Text: "summary"}}, enabledOptions())
+	require.Zero(t, other.module.SessionStats(t.Context(), other.sessionID).Batches,
+		"stats are scoped to the requested session")
 }

@@ -38,6 +38,10 @@ func newBlockingCoordinator() *blockingCoordinator {
 	}
 }
 
+func (c *blockingCoordinator) SessionProjectionStats(ctx context.Context, sessionID string) agent.ProjectionStats {
+	return agent.ProjectionStats{}
+}
+
 func (c *blockingCoordinator) Run(ctx context.Context, sessionID, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
 	return nil, nil
 }

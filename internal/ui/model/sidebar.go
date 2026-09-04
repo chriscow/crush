@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/crush/internal/ui/logo"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/ultraviolet/layout"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // modelInfo renders the current model information including reasoning
@@ -58,6 +59,34 @@ func (m *UI) modelInfo(width int) string {
 		modelName = model.CatwalkCfg.Name
 	}
 	return common.ModelInfo(m.com.Styles, modelName, providerName, reasoningInfo, modelContext, width, m.hyperCredits)
+}
+
+// projectionInfo renders a compact line under the model info showing how
+// much context context projection has saved on the current session. It
+// returns an empty string when nothing is projected.
+func (m *UI) projectionInfo(width int) string {
+	t := m.com.Styles
+	stats := m.projectionStats
+	if stats.Batches <= 0 || stats.RawChars <= 0 {
+		return ""
+	}
+
+	compression := 100 - (float64(stats.ProjectedChars)/float64(stats.RawChars))*100
+	if compression < 0 {
+		compression = 0
+	}
+
+	label := t.ModelInfo.Provider.Render("projected")
+	percent := t.ModelInfo.TokenPercentage.Render(fmt.Sprintf("-%d%%", int(compression)))
+	sizes := t.ModelInfo.TokenCount.Render(
+		fmt.Sprintf("(%s → %s)",
+			common.FormatTokenCount(stats.RawChars),
+			common.FormatTokenCount(stats.ProjectedChars),
+		),
+	)
+
+	line := fmt.Sprintf("%s %s %s", label, percent, sizes)
+	return ansi.Truncate(line, max(0, width), "…")
 }
 
 // updateSidebarScrollState renders the sidebar content and computes scroll
@@ -107,6 +136,7 @@ func (m *UI) updateSidebarScrollState() {
 		cwd,
 		"",
 		m.modelInfo(contentWidth),
+		m.projectionInfo(contentWidth),
 		"",
 		filesSection,
 		"",

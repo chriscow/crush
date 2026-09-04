@@ -270,6 +270,20 @@ func (w *AppWorkspace) AgentSummarize(ctx context.Context, sessionID string) err
 	return w.app.AgentCoordinator.Summarize(ctx, sessionID)
 }
 
+// AgentSessionProjectionStats reports context projection savings for the
+// session's active batches. Zero values mean nothing is projected.
+func (w *AppWorkspace) AgentSessionProjectionStats(ctx context.Context, sessionID string) AgentProjectionStats {
+	if w.app.AgentCoordinator == nil {
+		return AgentProjectionStats{}
+	}
+	stats := w.app.AgentCoordinator.SessionProjectionStats(ctx, sessionID)
+	return AgentProjectionStats{
+		Batches:        stats.Batches,
+		RawChars:       stats.RawChars,
+		ProjectedChars: stats.ProjectedChars,
+	}
+}
+
 func (w *AppWorkspace) UpdateAgentModel(ctx context.Context) error {
 	return w.app.UpdateAgentModel(ctx)
 }

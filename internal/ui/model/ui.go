@@ -440,6 +440,11 @@ type UI struct {
 	// no balance is rendered in either case.
 	hyperCredits *int
 
+	// projectionStats caches the context projection savings for the current
+	// session, refreshed off-thread on session load and after each agent
+	// turn. Zero batches render nothing in the sidebar.
+	projectionStats workspace.AgentProjectionStats
+
 	// Prompt history for up/down navigation through previous messages.
 	promptHistory struct {
 		messages []string
@@ -836,6 +841,10 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.applyBusyState(msg)...)
 	case promptQueueMsg:
 		cmds = append(cmds, m.applyPromptQueue(msg)...)
+	case projectionStatsMsg:
+		if m.session != nil && m.session.ID == msg.forSession {
+			m.projectionStats = msg.stats
+		}
 	case lspStatesMsg:
 		if cmd := m.applyLSPStates(msg); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -886,10 +895,14 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.promptQueueItems = nil
 		m.promptQueueCheckedAt = time.Time{}
 		m.cronTasks = nil
+		m.projectionStats = workspace.AgentProjectionStats{}
 		if cmd := m.dispatchBusyRefresh(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 		if cmd := m.dispatchPromptQueueRefresh(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		if cmd := m.dispatchProjectionRefresh(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 		cmds = append(cmds, m.startLSPs(msg.lspFilePaths()))
@@ -5756,6 +5769,9 @@ func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
 		m.updateHyperCredits()
 		if m.com.IsHyper() {
 			cmds = append(cmds, m.fetchHyperCredits())
+		}
+		if cmd := m.dispatchProjectionRefresh(); cmd != nil {
+			cmds = append(cmds, cmd)
 		}
 	case notify.TypeAgentError:
 		// Terminal edge like TypeAgentFinished; fall through to the

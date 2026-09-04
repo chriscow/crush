@@ -171,6 +171,16 @@ type contextProjector interface {
 	AccountUsage(ctx context.Context, sessionID string) error
 }
 
+// ProjectionStats summarizes context projection savings for a session as
+// exposed to frontends. Batches counts active projected batches, RawChars is
+// the canonical characters they replaced, and ProjectedChars is what the
+// provider-facing copies use.
+type ProjectionStats struct {
+	Batches        int64
+	RawChars       int64
+	ProjectedChars int64
+}
+
 type SessionAgent interface {
 	Run(context.Context, SessionAgentCall) (*fantasy.AgentResult, error)
 	BeginAccepted(sessionID string) *AcceptedRun

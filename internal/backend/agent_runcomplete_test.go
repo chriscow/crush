@@ -26,6 +26,10 @@ type errorCoordinator struct {
 	markPublished bool
 }
 
+func (c *errorCoordinator) SessionProjectionStats(ctx context.Context, sessionID string) agent.ProjectionStats {
+	return agent.ProjectionStats{}
+}
+
 func (c *errorCoordinator) Run(ctx context.Context, sessionID, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
 	return nil, c.err
 }
