@@ -58,7 +58,7 @@ func (m *UI) modelInfo(width int) string {
 	if model != nil {
 		modelName = model.CatwalkCfg.Name
 	}
-	return common.ModelInfo(m.com.Styles, modelName, providerName, reasoningInfo, modelContext, width, m.hyperCredits)
+	return common.ModelInfo(m.com.Styles, modelName, providerName, reasoningInfo, modelContext, m.projectionInfo(max(0, width-2)), width, m.hyperCredits)
 }
 
 // projectionInfo renders a compact line under the model info showing how
@@ -136,7 +136,6 @@ func (m *UI) updateSidebarScrollState() {
 		cwd,
 		"",
 		m.modelInfo(contentWidth),
-		m.projectionInfo(contentWidth),
 		"",
 		filesSection,
 		"",
