@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"sync"
 	"time"
@@ -217,6 +218,19 @@ func (m *Module) recordSummaryFailure(ctx context.Context, claimed claim, summar
 		value := m.now().Add(retryBackoff(claimed.attemptCount))
 		retryAfter = &value
 	}
+
+	// The persisted failure text is sanitized; the local log carries the
+	// underlying reason so operators can distinguish parse drift from
+	// transport trouble without touching the recoverable rows.
+	slog.Warn("Context projection summary attempt failed",
+		"session_id", claimed.candidate.SessionID,
+		"node_id", claimed.nodeID,
+		"attempt", claimed.attemptCount,
+		"class", string(class),
+		"validation", validation,
+		"error", summaryErr.Error(),
+	)
+
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	recordErr := m.store.fail(cleanupCtx, claimed, failure, retryAfter, usage, m.now())
 	cleanupCancel()
