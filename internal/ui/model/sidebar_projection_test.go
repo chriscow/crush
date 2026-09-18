@@ -10,11 +10,14 @@ import (
 )
 
 func TestProjectionInfo(t *testing.T) {
-	t.Run("hidden when nothing is projected", func(t *testing.T) {
+	t.Run("shows zero when nothing is projected", func(t *testing.T) {
 		t.Parallel()
 
 		ui := &UI{com: &common.Common{Styles: &styles.Styles{}}}
-		require.Equal(t, "", ui.projectionInfo(40))
+		plain := stripANSI(ui.projectionInfo(40))
+		require.Contains(t, plain, "tool output summarized")
+		require.Contains(t, plain, "0%")
+		require.NotContains(t, plain, "→")
 	})
 
 	t.Run("renders compression and size delta", func(t *testing.T) {
@@ -27,7 +30,7 @@ func TestProjectionInfo(t *testing.T) {
 			ProjectedChars: 6_200,
 		}
 		plain := stripANSI(ui.projectionInfo(40))
-		require.Contains(t, plain, "projected")
+		require.Contains(t, plain, "tool output summarized")
 		require.Contains(t, plain, "-38%")
 		require.Contains(t, plain, "10K")
 		require.Contains(t, plain, "6.2K")

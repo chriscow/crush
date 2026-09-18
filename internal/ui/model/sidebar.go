@@ -62,30 +62,33 @@ func (m *UI) modelInfo(width int) string {
 }
 
 // projectionInfo renders a compact line under the model info showing how
-// much context context projection has saved on the current session. It
-// returns an empty string when nothing is projected.
+// much context projection has saved on the current session. It always
+// renders, reporting 0% when nothing has been summarized yet.
 func (m *UI) projectionInfo(width int) string {
 	t := m.com.Styles
 	stats := m.projectionStats
-	if stats.Batches <= 0 || stats.RawChars <= 0 {
-		return ""
+
+	label := t.ModelInfo.Provider.Render("tool output summarized")
+
+	var parts []string
+	parts = append(parts, label)
+	if stats.RawChars <= 0 {
+		parts = append(parts, t.ModelInfo.TokenPercentage.Render("0%"))
+	} else {
+		compression := 100 - (float64(stats.ProjectedChars)/float64(stats.RawChars))*100
+		if compression < 0 {
+			compression = 0
+		}
+		parts = append(parts, t.ModelInfo.TokenPercentage.Render(fmt.Sprintf("-%d%%", int(compression))))
+		parts = append(parts, t.ModelInfo.TokenCount.Render(
+			fmt.Sprintf("(%s → %s)",
+				common.FormatTokenCount(stats.RawChars),
+				common.FormatTokenCount(stats.ProjectedChars),
+			),
+		))
 	}
 
-	compression := 100 - (float64(stats.ProjectedChars)/float64(stats.RawChars))*100
-	if compression < 0 {
-		compression = 0
-	}
-
-	label := t.ModelInfo.Provider.Render("projected")
-	percent := t.ModelInfo.TokenPercentage.Render(fmt.Sprintf("-%d%%", int(compression)))
-	sizes := t.ModelInfo.TokenCount.Render(
-		fmt.Sprintf("(%s → %s)",
-			common.FormatTokenCount(stats.RawChars),
-			common.FormatTokenCount(stats.ProjectedChars),
-		),
-	)
-
-	line := fmt.Sprintf("%s %s %s", label, percent, sizes)
+	line := strings.Join(parts, " ")
 	return ansi.Truncate(line, max(0, width), "…")
 }
 
