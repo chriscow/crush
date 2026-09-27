@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/scheduler"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -157,14 +158,18 @@ func (c *recordingCoordinator) RunAccepted(ctx context.Context, _ *agent.Accepte
 	return nil, nil
 }
 
-func (c *recordingCoordinator) BeginAccepted(string) *agent.AcceptedRun       { return nil }
-func (c *recordingCoordinator) Cancel(string)                                 {}
-func (c *recordingCoordinator) CancelAll()                                    {}
-func (c *recordingCoordinator) IsBusy() bool                                  { return false }
-func (c *recordingCoordinator) IsSessionBusy(string) bool                     { return false }
-func (c *recordingCoordinator) QueuedPrompts(string) int                      { return 0 }
-func (c *recordingCoordinator) QueuedPromptsList(string) []string             { return nil }
-func (c *recordingCoordinator) ClearQueue(string)                             {}
+func (c *recordingCoordinator) BeginAccepted(string) *agent.AcceptedRun { return nil }
+func (c *recordingCoordinator) Cancel(string)                           {}
+func (c *recordingCoordinator) CancelAll()                              {}
+func (c *recordingCoordinator) IsBusy() bool                            { return false }
+func (c *recordingCoordinator) IsSessionBusy(string) bool               { return false }
+func (c *recordingCoordinator) QueuedPrompts(string) int                { return 0 }
+func (c *recordingCoordinator) QueuedPromptsList(string) []string       { return nil }
+func (c *recordingCoordinator) ClearQueue(string)                       {}
+func (c *recordingCoordinator) ListCronTasks(string) []scheduler.Task   { return nil }
+func (c *recordingCoordinator) SessionProjectionStats(context.Context, string) agent.ProjectionStats {
+	return agent.ProjectionStats{}
+}
 func (c *recordingCoordinator) Summarize(context.Context, string) error       { return nil }
 func (c *recordingCoordinator) Model() agent.Model                            { return agent.Model{} }
 func (c *recordingCoordinator) UpdateModels(context.Context) error            { return nil }

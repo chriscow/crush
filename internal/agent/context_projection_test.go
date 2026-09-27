@@ -76,6 +76,13 @@ func (s *orderedMessageService) List(ctx context.Context, sessionID string) ([]m
 	return s.Service.List(ctx, sessionID)
 }
 
+func (s *orderedMessageService) ListFromSummary(ctx context.Context, sessionID, summaryMessageID string) ([]message.Message, error) {
+	s.mu.Lock()
+	s.events = append(s.events, "list")
+	s.mu.Unlock()
+	return s.Service.ListFromSummary(ctx, sessionID, summaryMessageID)
+}
+
 func (s *orderedMessageService) Create(ctx context.Context, sessionID string, params message.CreateMessageParams) (message.Message, error) {
 	if params.IsSummaryMessage && s.projected != nil && *s.projected {
 		return message.Message{}, errors.New("manual summarization unexpectedly invoked context projection")

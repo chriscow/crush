@@ -101,7 +101,7 @@ func TestBuildProviderOpenCodeRouting(t *testing.T) {
 				provider, err := coord.buildProvider(providerCfg, config.SelectedModel{
 					Model:    modelID,
 					Provider: providerID,
-				}, false)
+				}, providerBuildOptions{})
 				require.NoError(t, err, modelID)
 				require.NotNil(t, provider, modelID)
 			}

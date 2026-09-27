@@ -224,7 +224,8 @@ func TestBuildAgentDisabledProjectionUsesQueryOnlyModule(t *testing.T) {
 	projection.Enabled = true
 	projection.SummarizerModel = config.SelectedModelTypeSmall
 	projection.SummarizerTimeout = time.Second
-	coord.currentAgent = topLevel
+	coord.mainAgent = topLevel
+	coord.mainAgentName = config.AgentCoder
 	require.NoError(t, coord.UpdateModels(t.Context()))
 	require.NotNil(t, coord.contextSummarizer)
 	require.True(t, coord.contextModule.Options().Enabled)
