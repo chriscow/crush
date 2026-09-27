@@ -192,9 +192,17 @@ func NewGrepTool(workingDir string, config config.ToolGrep) fantasy.AgentTool {
 }
 
 func searchFiles(ctx context.Context, pattern, rootPath, include string, limit int) ([]grepMatch, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+
 	matches, err := searchWithRipgrep(ctx, pattern, rootPath, include)
 	if err != nil {
-		matches, err = searchFilesWithRegex(pattern, rootPath, include)
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
+
+		matches, err = searchFilesWithRegex(ctx, pattern, rootPath, include)
 		if err != nil {
 			return nil, false, err
 		}
@@ -284,7 +292,11 @@ type ripgrepMatch struct {
 	} `json:"data"`
 }
 
-func searchFilesWithRegex(pattern, rootPath, include string) ([]grepMatch, error) {
+func searchFilesWithRegex(ctx context.Context, pattern, rootPath, include string) ([]grepMatch, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	matches := []grepMatch{}
 
 	// Use cached regex compilation
@@ -308,6 +320,9 @@ func searchFilesWithRegex(pattern, rootPath, include string) ([]grepMatch, error
 	err = filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil // Skip errors
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 
 		if info.IsDir() {
@@ -333,8 +348,11 @@ func searchFilesWithRegex(pattern, rootPath, include string) ([]grepMatch, error
 			return nil
 		}
 
-		lineMatches, err := fileMatches(path, regex)
+		lineMatches, err := fileMatches(ctx, path, regex)
 		if err != nil {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			return nil // Skip files we can't read
 		}
 
@@ -356,6 +374,9 @@ func searchFilesWithRegex(pattern, rootPath, include string) ([]grepMatch, error
 	if err != nil {
 		return nil, err
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	return matches, nil
 }
@@ -372,8 +393,12 @@ type lineMatch struct {
 // fileMatches returns every line in filePath that matches pattern. Like
 // ripgrep, it reports one entry per matching line (using the first match
 // on the line for the column) instead of stopping at the first match in
-// the file.
-func fileMatches(filePath string, pattern *regexp.Regexp) ([]lineMatch, error) {
+// the file. Cancellation returns the context error without partial matches.
+func fileMatches(ctx context.Context, filePath string, pattern *regexp.Regexp) ([]lineMatch, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	if pattern == nil {
 		return nil, nil
 	}
@@ -392,7 +417,14 @@ func fileMatches(filePath string, pattern *regexp.Regexp) ([]lineMatch, error) {
 	reader := bufio.NewReader(file)
 	lineNum := 0
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
 		line, err := reader.ReadString('\n')
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		lineNum++
 		line = strings.TrimSuffix(line, "\n")
 		line = strings.TrimSuffix(line, "\r")
@@ -409,6 +441,10 @@ func fileMatches(filePath string, pattern *regexp.Regexp) ([]lineMatch, error) {
 		if err != nil {
 			return nil, err
 		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	return matches, nil
